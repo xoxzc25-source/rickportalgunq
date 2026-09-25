@@ -1,15 +1,16 @@
 --═══════════════════════════════════════════════════════════════════
---  PORTAL GUN v24 — LocalScript
+--  PORTAL GUN v30 — LocalScript
 --  Куда: StarterPlayer → StarterPlayerScripts
---  НОВОЕ против v23:
---   • УМНЫЙ ПРОБОЙ: невидимое (>=0.95) и прозрачный декор (неколлиз.
---     >=0.5) пробивается. Стекло/решётки/витрины (плотные) — НЕТ,
---     портал встаёт прямо на них. Раньше пробой 0.5 «съедал» стекло,
---     а за границами карты был воздух → портал улетал в небо
---   • ПЛАВНОЕ ЗАКРЫТИЕ ВЕЗДЕ: «Удалить порталы», замена портала
---     новым выстрелом и 20-сек таймер — одна анимация схлопывания
---   • ТЕЛЕПОРТ В ПЛЕЙС: вкладка «Плейс» → вводишь ID плейса → перенос
---     (клиентский Teleport, работает только для себя)
+--  TG: RickPrimeScripts
+--  ГЛАВНОЕ против v29:
+--   • ДВОЙНАЯ ЗАГРУЗКА АССЕТОВ: сначала ReplicatedStorage
+--     ("PortalGun" и "PortalTemplate" — для опубликованной игры),
+--     затем GetObjects (работает в Studio)
+--   • В Studio: просто вставь скрипт — всё работает по айди
+--   • В опубликованной игре: положи модели в ReplicatedStorage
+--     с именами PortalGun и PortalTemplate — у игроков всё соберётся
+--   • Вся механика v29: сплэш-карточка с TG, кредитка во всех вкладках,
+--     струя тает вдали (нет «стены»), портал только на поверхности
 --═══════════════════════════════════════════════════════════════════
 
 local Players          = game:GetService("Players")
@@ -19,6 +20,7 @@ local UserInputService = game:GetService("UserInputService")
 local Debris           = game:GetService("Debris")
 local Lighting         = game:GetService("Lighting")
 local TeleportService  = game:GetService("TeleportService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera      = workspace.CurrentCamera
@@ -28,13 +30,18 @@ local CONFIG = {
     GUN_ID   = 13392984071,
     GUN_NAME = "Portal Gun",
 
+    -- имена моделей в ReplicatedStorage (для опубликованной игры)
+    RS_GUN_NAME     = "PortalGun",
+    RS_PORTAL_NAME  = "PortalTemplate",
+
     SCALE    = 0.665,
     GRIP_POS = Vector3.new(-0.417, 0.000, 0.500),
     GRIP_ROT = Vector3.new(0, -90, 90),
 
     FIRE_COOLDOWN = 0.7,
-    MAX_RANGE     = 500,
-    SKY_RANGE     = 120,
+    MAX_RANGE     = 1000,
+
+    SKY_PORTALS = false,
 
     DEBUG_AIM = false,
 
@@ -66,6 +73,203 @@ local function easeOutBack(t, c)
     return 1 + (c + 1) * u * u * u + c * u * u
 end
 
+--───────────── СПЛЭШ (TG: RickPrimeScripts) ─────────────
+local function showSplash()
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "PGSplash"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.DisplayOrder = 999
+    gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+    -- лёгкое затемнение фона (не нужно — удали эти 5 строк)
+    local dim = Instance.new("Frame")
+    dim.Size = UDim2.fromScale(1, 1)
+    dim.BackgroundColor3 = Color3.new(0, 0, 0)
+    dim.BackgroundTransparency = 0.7
+    dim.BorderSizePixel = 0
+    dim.Parent = gui
+
+    local card = Instance.new("Frame")
+    card.AnchorPoint = Vector2.new(0.5, 0.5)
+    card.Position = UDim2.fromScale(0.5, 0.5)
+    card.Size = UDim2.fromOffset(20, 24)
+    card.BackgroundColor3 = Color3.fromRGB(10, 16, 11)
+    card.BackgroundTransparency = 0.06
+    card.BorderSizePixel = 0
+    card.Parent = gui
+    Instance.new("UICorner", card).CornerRadius = UDim.new(0, 18)
+    local cardStroke = Instance.new("UIStroke", card)
+    cardStroke.Color = CONFIG.C_MAIN
+    cardStroke.Thickness = 2
+    cardStroke.Transparency = 0.2
+
+    local glow = Instance.new("Frame")
+    glow.Size = UDim2.fromOffset(190, 190)
+    glow.Position = UDim2.fromScale(0.5, 0.33)
+    glow.AnchorPoint = Vector2.new(0.5, 0.5)
+    glow.BackgroundColor3 = CONFIG.C_DEEP
+    glow.BackgroundTransparency = 0.62
+    glow.BorderSizePixel = 0
+    glow.Parent = card
+    Instance.new("UICorner", glow).CornerRadius = UDim.new(1, 0)
+
+    local holder = Instance.new("Frame")
+    holder.Size = UDim2.fromOffset(118, 118)
+    holder.Position = UDim2.fromScale(0.5, 0.33)
+    holder.AnchorPoint = Vector2.new(0.5, 0.5)
+    holder.BackgroundTransparency = 1
+    holder.Parent = card
+
+    local ring = Instance.new("Frame")
+    ring.Size = UDim2.fromScale(1, 1)
+    ring.BackgroundTransparency = 1
+    ring.Parent = holder
+    Instance.new("UICorner", ring).CornerRadius = UDim.new(1, 0)
+    local ringStroke = Instance.new("UIStroke", ring)
+    ringStroke.Thickness = 8
+    ringStroke.Color = CONFIG.C_MAIN
+    local ringGrad = Instance.new("UIGradient", ringStroke)
+    ringGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, CONFIG.C_CORE),
+        ColorSequenceKeypoint.new(0.5, CONFIG.C_DEEP),
+        ColorSequenceKeypoint.new(1, CONFIG.C_CORE),
+    })
+
+    local inner = Instance.new("Frame")
+    inner.Size = UDim2.fromScale(0.72, 0.72)
+    inner.Position = UDim2.fromScale(0.5, 0.5)
+    inner.AnchorPoint = Vector2.new(0.5, 0.5)
+    inner.BackgroundColor3 = CONFIG.C_DEEP
+    inner.BackgroundTransparency = 0.2
+    inner.BorderSizePixel = 0
+    inner.Parent = holder
+    Instance.new("UICorner", inner).CornerRadius = UDim.new(1, 0)
+    local innerGrad = Instance.new("UIGradient", inner)
+    innerGrad.Rotation = 90
+    innerGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, CONFIG.C_MAIN),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(10, 30, 8)),
+    })
+
+    local core = Instance.new("Frame")
+    core.Size = UDim2.fromOffset(24, 24)
+    core.Position = UDim2.fromScale(0.5, 0.5)
+    core.AnchorPoint = Vector2.new(0.5, 0.5)
+    core.BackgroundColor3 = CONFIG.C_CORE
+    core.BorderSizePixel = 0
+    core.Parent = holder
+    Instance.new("UICorner", core).CornerRadius = UDim.new(1, 0)
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -20, 0, 40)
+    title.Position = UDim2.new(0, 10, 0, 206)
+    title.BackgroundTransparency = 1
+    title.Text = "PORTAL GUN"
+    title.Font = Enum.Font.GothamBlack
+    title.TextSize = 32
+    title.TextColor3 = Color3.new(1, 1, 1)
+    title.Parent = card
+    local titleGrad = Instance.new("UIGradient", title)
+    titleGrad.Rotation = 90
+    titleGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.new(1, 1, 1)),
+        ColorSequenceKeypoint.new(1, CONFIG.C_MAIN),
+    })
+
+    -- бейдж TG + ник
+    local tgBadge = Instance.new("TextLabel")
+    tgBadge.Size = UDim2.fromOffset(58, 24)
+    tgBadge.Position = UDim2.new(0.5, 0, 0, 248)
+    tgBadge.AnchorPoint = Vector2.new(0.5, 0.5)
+    tgBadge.BackgroundColor3 = CONFIG.C_MAIN
+    tgBadge.Text = "TG"
+    tgBadge.Font = Enum.Font.GothamBlack
+    tgBadge.TextSize = 14
+    tgBadge.TextColor3 = Color3.fromRGB(10, 16, 11)
+    tgBadge.BorderSizePixel = 0
+    tgBadge.Parent = card
+    Instance.new("UICorner", tgBadge).CornerRadius = UDim.new(0, 8)
+
+    local credit = Instance.new("TextLabel")
+    credit.Size = UDim2.new(1, -20, 0, 20)
+    credit.Position = UDim2.new(0, 10, 0, 262)
+    credit.BackgroundTransparency = 1
+    credit.Text = "RickPrimeScripts"
+    credit.Font = Enum.Font.GothamBold
+    credit.TextSize = 16
+    credit.TextColor3 = Color3.new(1, 1, 1)
+    credit.TextTransparency = 0.1
+    credit.Parent = card
+
+    local barBg = Instance.new("Frame")
+    barBg.Size = UDim2.fromOffset(190, 6)
+    barBg.Position = UDim2.new(0.5, 0, 0, 300)
+    barBg.AnchorPoint = Vector2.new(0.5, 0.5)
+    barBg.BackgroundColor3 = Color3.fromRGB(20, 35, 22)
+    barBg.BorderSizePixel = 0
+    barBg.Parent = card
+    Instance.new("UICorner", barBg).CornerRadius = UDim.new(1, 0)
+
+    local barFill = Instance.new("Frame")
+    barFill.Size = UDim2.new(0, 0, 1, 0)
+    barFill.BackgroundColor3 = CONFIG.C_MAIN
+    barFill.BorderSizePixel = 0
+    barFill.Parent = barBg
+    Instance.new("UICorner", barFill).CornerRadius = UDim.new(1, 0)
+
+    local ver = Instance.new("TextLabel")
+    ver.Size = UDim2.fromOffset(80, 16)
+    ver.Position = UDim2.new(1, -14, 1, -20)
+    ver.AnchorPoint = Vector2.new(1, 1)
+    ver.BackgroundTransparency = 1
+    ver.Text = "v30"
+    ver.Font = Enum.Font.Gotham
+    ver.TextSize = 11
+    ver.TextColor3 = CONFIG.C_MAIN
+    ver.TextTransparency = 0.4
+    ver.TextXAlignment = Enum.TextXAlignment.Right
+    ver.Parent = card
+
+    TweenService:Create(card,
+        TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+        { Size = UDim2.fromOffset(300, 360) }):Play()
+    TweenService:Create(barFill,
+        TweenInfo.new(1.9, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut),
+        { Size = UDim2.new(1, 0, 1, 0) }):Play()
+
+    task.spawn(function()
+        local t0 = os.clock()
+        while gui.Parent do
+            local el = os.clock() - t0
+            ringGrad.Rotation = (el * 140) % 360
+            local pulse = 24 + math.sin(el * 5) * 5
+            core.Size = UDim2.fromOffset(pulse, pulse)
+            glow.BackgroundTransparency = 0.62 + math.sin(el * 2.4) * 0.12
+            task.wait(0.03)
+        end
+    end)
+
+    task.wait(2.4)
+    local fadeInfo = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+    TweenService:Create(dim, fadeInfo, { BackgroundTransparency = 1 }):Play()
+    TweenService:Create(card, fadeInfo, { BackgroundTransparency = 1 }):Play()
+    TweenService:Create(cardStroke, fadeInfo, { Transparency = 1 }):Play()
+    for _, o in ipairs(card:GetChildren()) do
+        if o:IsA("TextLabel") then
+            TweenService:Create(o, fadeInfo, { TextTransparency = 1 }):Play()
+        elseif o:IsA("Frame") then
+            TweenService:Create(o, fadeInfo, { BackgroundTransparency = 1 }):Play()
+        end
+    end
+    TweenService:Create(ringStroke, fadeInfo, { Transparency = 1 }):Play()
+    TweenService:Create(barBg, fadeInfo, { BackgroundTransparency = 1 }):Play()
+    TweenService:Create(barFill, fadeInfo, { BackgroundTransparency = 1 }):Play()
+
+    task.wait(0.5)
+    if gui.Parent then gui:Destroy() end
+end
+
 --───────────── ЗВУК ─────────────
 local function playSoundAt(pos, id, pitch)
     if id == "" then return end
@@ -87,8 +291,25 @@ local function playSoundAt(pos, id, pitch)
     Debris:AddItem(holder, 5)
 end
 
---───────────── ЗАГРУЗКА АССЕТОВ ─────────────
-local function loadAsset(id)
+--───────────── ДВОЙНАЯ ЗАГРУЗКА АССЕТОВ ─────────────
+-- 1) ReplicatedStorage (работает в ОПУБЛИКОВАННОЙ игре)
+-- 2) GetObjects (работает только в Studio)
+local function isStudio()
+    local ok = pcall(function() return game:GetService("RunService"):IsStudio() end)
+    return ok and game:GetService("RunService"):IsStudio()
+end
+
+local function loadFromStorage(name)
+    local obj = ReplicatedStorage:FindFirstChild(name)
+    if obj then
+        local clone = obj:Clone()
+        print(("[Portal Gun] '%s' загружено из ReplicatedStorage ✅"):format(name))
+        return clone
+    end
+    return nil
+end
+
+local function loadById(id)
     local ok, result = pcall(function()
         return game:GetObjects(id)
     end)
@@ -103,6 +324,25 @@ local function loadAsset(id)
     return result[1]
 end
 
+local function loadGunModel()
+    -- сначала ReplicatedStorage
+    local stored = loadFromStorage(CONFIG.RS_GUN_NAME)
+    if stored then return stored end
+
+    -- затем Studio-загрузка по айди
+    local asset = loadById("rbxassetid://" .. CONFIG.GUN_ID)
+    if asset then return asset end
+
+    if not isStudio() then
+        warn("[Portal Gun] В ОПУБЛИКОВАННОЙ ИГРЕ GetObjects НЕ РАБОТАЕТ.")
+        warn("[Portal Gun] Положи модель пушки в ReplicatedStorage с именем '"
+            .. CONFIG.RS_GUN_NAME .. "'")
+    else
+        warn("[Portal Gun] Пушка не загрузилась по ID " .. CONFIG.GUN_ID)
+    end
+    return nil
+end
+
 --───────────── ШАБЛОН ПОРТАЛА ─────────────
 local portalTemplate = nil
 local portalTemplateTried = false
@@ -111,9 +351,19 @@ local function getPortalTemplate()
     if portalTemplateTried then return portalTemplate end
     portalTemplateTried = true
 
-    local asset = loadAsset(CONFIG.PORTAL_MODEL_ID)
+    -- сначала ReplicatedStorage
+    local asset = loadFromStorage(CONFIG.RS_PORTAL_NAME)
+    if not asset then
+        -- затем Studio-загрузка по айди
+        asset = loadById(CONFIG.PORTAL_MODEL_ID)
+    end
+
     if not asset then
         warn("[Portal Gun] МОДЕЛЬ ПОРТАЛА не загрузилась → fallback")
+        if not isStudio() then
+            warn("[Portal Gun] Положи модель портала в ReplicatedStorage с именем '"
+                .. CONFIG.RS_PORTAL_NAME .. "'")
+        end
         return nil
     end
 
@@ -132,7 +382,7 @@ local function getPortalTemplate()
     end
 
     portalTemplate = container
-    print("[Portal Gun] Модель портала загружена ✅")
+    print("[Portal Gun] Модель портала готова ✅")
     return portalTemplate
 end
 
@@ -207,11 +457,8 @@ local function buildAndGive()
     if currentTool then pcall(function() currentTool:Destroy() end) end
     equippedTool = nil
 
-    local asset = loadAsset("rbxassetid://" .. CONFIG.GUN_ID)
-    if not asset then
-        warn("[Gun] НЕ ЗАГРУЗИЛОСЬ по ID " .. CONFIG.GUN_ID)
-        return
-    end
+    local asset = loadGunModel()
+    if not asset then return end
 
     local mainModel = Instance.new("Model")
     mainModel.Name = "GunParts"
@@ -285,50 +532,6 @@ local function buildAndGive()
     tool:SetAttribute("MuzzlePart", farPart and farPart.Name or "")
 end
 
---───────────── КРЕСТИК ─────────────
-local crossGui = Instance.new("ScreenGui")
-crossGui.Name = "PGCrosshair"
-crossGui.ResetOnSpawn = false
-crossGui.IgnoreGuiInset = true
-crossGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
-
-local crossCircle = Instance.new("Frame")
-crossCircle.AnchorPoint = Vector2.new(0.5, 0.5)
-crossCircle.Size = UDim2.fromOffset(16, 16)
-crossCircle.BackgroundTransparency = 1
-crossCircle.Visible = false
-crossCircle.Parent = crossGui
-local ccStroke = Instance.new("UIStroke", crossCircle)
-ccStroke.Color = CONFIG.C_MAIN
-ccStroke.Thickness = 1.5
-ccStroke.Transparency = 0.25
-Instance.new("UICorner", crossCircle).CornerRadius = UDim.new(1, 0)
-
-local crossDot = Instance.new("Frame")
-crossDot.AnchorPoint = Vector2.new(0.5, 0.5)
-crossDot.Size = UDim2.fromOffset(4, 4)
-crossDot.BackgroundColor3 = CONFIG.C_CORE
-crossDot.BorderSizePixel = 0
-crossDot.Visible = false
-crossDot.Parent = crossGui
-Instance.new("UICorner", crossDot).CornerRadius = UDim.new(1, 0)
-
-RunService.RenderStepped:Connect(function()
-    local show = equippedTool ~= nil and equippedTool.Parent == LocalPlayer.Character
-    crossCircle.Visible = show
-    crossDot.Visible = show
-    if show then
-        local m
-        if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then
-            m = Camera.ViewportSize / 2
-        else
-            m = UserInputService:GetMouseLocation()
-        end
-        crossCircle.Position = UDim2.fromOffset(m.X, m.Y)
-        crossDot.Position = UDim2.fromOffset(m.X, m.Y)
-    end
-end)
-
 --───────────── ПОРТАЛЫ: СОСТОЯНИЕ ─────────────
 local portalA, portalB = nil, nil
 local tpCooldown = 0
@@ -347,7 +550,6 @@ local function releasePortalData(d)
     if changed then notifyPortalsChanged() end
 end
 
--- Очистка: теперь ПЛАВНОЕ закрытие, а не мгновенный Destroy
 local function clearPortals()
     for _, p in ipairs({ portalA, portalB }) do
         if p then
@@ -365,7 +567,6 @@ end
 local function claimPortalSlot()
     if not portalA then return "A" end
     if not portalB then return "B" end
-    -- вытесняемый портал тоже закрывается ПЛАВНО
     local old = portalA
     portalA = portalB
     portalB = nil
@@ -491,8 +692,6 @@ local function openPortalAt(pos, normal)
 
         local angle = 0
 
-        -- ЕДИНАЯ анимация закрытия: работает и по кнопке «Удалить»,
-        -- и при замене новым порталом, и по 20-сек таймеру
         data.close = function()
             if data.closed then return end
             data.closed = true
@@ -514,7 +713,6 @@ local function openPortalAt(pos, normal)
         end
 
         task.spawn(function()
-            -- открытие
             local t0 = os.clock()
             local last = t0
             while true do
@@ -533,7 +731,6 @@ local function openPortalAt(pos, normal)
             end
             applyPose(1, 1, angle)
 
-            -- жизнь: крутится до конца времени (минус запас на закрытие)
             local bornAt = os.clock()
             while clone.Parent and not data.closed
                 and (os.clock() - bornAt) < (CONFIG.PORTAL_LIFETIME - CLOSE_DUR) do
@@ -543,7 +740,7 @@ local function openPortalAt(pos, normal)
             end
 
             if clone.Parent then
-                data.close() -- естественное закрытие по таймеру
+                data.close()
             end
         end)
 
@@ -760,18 +957,12 @@ local function debugMarker(pos)
     Debris:AddItem(d, 1.2)
 end
 
---───────────── УМНОЕ ПРАВИЛО ПРОБОЯ ─────────────
--- • полностью невидимое (Transparency >= 0.95): барьеры, границы,
---   хитбоксы — ВСЕГДА пробиваем
--- • прозрачный декор (CanCollide = false, прозрачность >= 0.5):
---   дымы, эффекты — пробиваем
--- • ПЛОТНЫЕ полупрозрачные (CanCollide = true): стекло, решётки,
---   витрины — НЕ пробиваем, портал встаёт прямо на них
+--───────────── ПРАВИЛО ПРОБОЯ ─────────────
 local function isGhost(inst)
     if not inst:IsA("BasePart") or inst == workspace.Terrain then
         return false
     end
-    if inst.Transparency >= 0.95 then
+    if inst.Transparency >= 0.85 then
         return true
     end
     if not inst.CanCollide and inst.Transparency >= 0.5 then
@@ -799,8 +990,12 @@ local function computeAim(char)
         end
     end
 
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local firstPerson = root and (root.Position - camPos).Magnitude < 3
+
     local list = table.clone(exclude)
     local o, remaining = camPos, CONFIG.MAX_RANGE
+    local nearSkips = 0
 
     for _ = 1, 24 do
         local params = RaycastParams.new()
@@ -811,33 +1006,40 @@ local function computeAim(char)
         local hit = workspace:Raycast(o, ray.Direction * remaining, params)
         if not hit then break end
 
-        if isGhost(hit.Instance) then
+        local used = (hit.Position - o).Magnitude
+
+        if not firstPerson and used < 2.5 and nearSkips < 3 then
+            nearSkips = nearSkips + 1
+            table.insert(list, hit.Instance)
+            o = hit.Position + ray.Direction * 0.05
+            remaining = remaining - (used + 0.05)
+            if remaining <= 0.05 then break end
+        elseif isGhost(hit.Instance) then
             if debugAim then
                 print(("[Portal Gun] пробито: %s (прозрачность %.2f, коллизия %s)")
                     :format(hit.Instance:GetFullName(),
                         hit.Instance.Transparency, tostring(hit.Instance.CanCollide)))
             end
             table.insert(list, hit.Instance)
-            local used = (hit.Position - o).Magnitude + 0.05
             o = hit.Position + ray.Direction * 0.05
-            remaining = remaining - used
+            remaining = remaining - (used + 0.05)
             if remaining <= 0.05 then break end
         else
             if debugAim then debugMarker(hit.Position) end
-            return hit.Position, hit, ray
+            return hit, ray, hit.Position, false
         end
     end
 
-    local skyPoint = camPos + ray.Direction * CONFIG.SKY_RANGE
-    if debugAim then debugMarker(skyPoint) end
-    return skyPoint, nil, ray
+    local endPoint = camPos + ray.Direction * CONFIG.MAX_RANGE
+    return nil, ray, endPoint, true
 end
 
 --───────────── ЖИДКАЯ СТРУЯ ─────────────
-local function drawLiquidTracer(origin, aimPoint)
+local function drawLiquidTracer(origin, aimPoint, fadeTip)
     local dir = (aimPoint - origin)
     local length = dir.Magnitude
-    dir = dir.Unit
+    if length < 0.5 then return end
+    dir = dir / length
 
     local right = dir:Cross(Vector3.yAxis)
     right = right.Magnitude > 0.05 and right.Unit or Vector3.xAxis
@@ -847,7 +1049,7 @@ local function drawLiquidTracer(origin, aimPoint)
     holder.Name = "PG_Tracer"
     holder.Parent = workspace
 
-    local SEGS = 8
+    local SEGS = 10
     local atts = {}
     for i = 0, SEGS do
         local p = origin + dir * (length * i / SEGS)
@@ -862,15 +1064,23 @@ local function drawLiquidTracer(origin, aimPoint)
         basePos[i] = atts[i].WorldPosition
     end
 
+    local wmul = {}
+    for i = 0, SEGS - 1 do
+        if fadeTip then
+            local f = i / SEGS
+            wmul[i] = math.clamp((1 - f) / 0.3, 0, 1)
+        else
+            wmul[i] = 1
+        end
+    end
+
     local coreBeams, midBeams, outBeams = {}, {}, {}
     local W = 0.55
     for i = 0, SEGS - 1 do
-        local function mk(w, col, emis, transp)
+        local function mk(col, emis, transp)
             local b = Instance.new("Beam")
             b.Attachment0 = atts[i]
             b.Attachment1 = atts[i + 1]
-            b.Width0 = w
-            b.Width1 = w
             b.Color = col
             b.LightEmission = emis
             b.LightInfluence = 0
@@ -880,9 +1090,9 @@ local function drawLiquidTracer(origin, aimPoint)
             b.Parent = holder
             return b
         end
-        coreBeams[i] = mk(W * 0.27, ColorSequence.new(CONFIG.C_CORE), 1, NumberSequence.new(0))
-        midBeams[i]  = mk(W, ColorSequence.new(CONFIG.C_MAIN, CONFIG.C_DEEP), 1, NumberSequence.new(0.15))
-        outBeams[i]  = mk(W * 2.27, ColorSequence.new(CONFIG.C_DEEP), 0.6, NumberSequence.new(0.85))
+        coreBeams[i] = mk(ColorSequence.new(CONFIG.C_CORE), 1, NumberSequence.new(0))
+        midBeams[i]  = mk(ColorSequence.new(CONFIG.C_MAIN, CONFIG.C_DEEP), 1, NumberSequence.new(0.15))
+        outBeams[i]  = mk(ColorSequence.new(CONFIG.C_DEEP), 0.6, NumberSequence.new(0.85))
         midBeams[i].Texture = "rbxasset://textures/particles/sparkles_main.dds"
         midBeams[i].TextureMode = Enum.TextureMode.Wrap
         midBeams[i].TextureLength = 2.5
@@ -890,7 +1100,8 @@ local function drawLiquidTracer(origin, aimPoint)
     end
 
     local droplets = {}
-    for _, i in ipairs({ 2, 4, 6 }) do
+    local dropletIdx = fadeTip and { 2, 4 } or { 2, 4, 6 }
+    for _, i in ipairs(dropletIdx) do
         local em = Instance.new("ParticleEmitter")
         em.Texture = "rbxasset://textures/particles/sparkles_main.dds"
         em.Color = ColorSequence.new(CONFIG.C_MAIN, CONFIG.C_DEEP)
@@ -939,16 +1150,21 @@ local function drawLiquidTracer(origin, aimPoint)
 
             local w = alpha * (1 + math.sin(el * 26) * 0.07)
             for i = 0, SEGS - 1 do
-                coreBeams[i].Width0 = W * 0.27 * w
-                coreBeams[i].Width1 = W * 0.27 * w
-                midBeams[i].Width0 = W * w
-                midBeams[i].Width1 = W * w
-                outBeams[i].Width0 = W * 2.27 * w
-                outBeams[i].Width1 = W * 2.27 * w
+                local wm = wmul[i] * w
+                coreBeams[i].Width0 = W * 0.27 * wm
+                coreBeams[i].Width1 = W * 0.27 * wm
+                midBeams[i].Width0 = W * wm
+                midBeams[i].Width1 = W * wm
+                outBeams[i].Width0 = W * 2.27 * wm
+                outBeams[i].Width1 = W * 2.27 * wm
 
-                coreBeams[i].Transparency = NumberSequence.new(math.clamp(1 - alpha, 0, 1))
-                midBeams[i].Transparency = NumberSequence.new(math.clamp(1 - alpha * 0.82, 0, 1))
-                outBeams[i].Transparency = NumberSequence.new(math.clamp(1 - alpha * 0.18, 0, 1))
+                local tip = 1 - wmul[i]
+                coreBeams[i].Transparency = NumberSequence.new(
+                    math.clamp((1 - alpha) + tip, 0, 1))
+                midBeams[i].Transparency = NumberSequence.new(
+                    math.clamp((1 - alpha * 0.82) + tip, 0, 1))
+                outBeams[i].Transparency = NumberSequence.new(
+                    math.clamp((1 - alpha * 0.18) + tip, 0, 1))
             end
 
             for _, em in ipairs(droplets) do
@@ -977,7 +1193,7 @@ local function fire()
     fireBusy = true
     task.delay(CONFIG.FIRE_COOLDOWN, function() fireBusy = false end)
 
-    local aimPoint, hit, ray = computeAim(char)
+    local hit, ray, endPoint, voidShot = computeAim(char)
 
     local muzzleName = currentTool:GetAttribute("MuzzlePart") or ""
     local muzzle = muzzleName ~= "" and char:FindFirstChild(muzzleName, true) or nil
@@ -990,17 +1206,12 @@ local function fire()
     end
 
     playSoundAt(origin, CONFIG.SOUND_FIRE, 1)
-    drawLiquidTracer(origin, aimPoint)
+    drawLiquidTracer(origin, endPoint, voidShot)
 
-    local hitPos, hitNormal
     if hit then
-        hitPos, hitNormal = hit.Position, hit.Normal
-    else
-        hitPos, hitNormal = aimPoint, -ray.Direction
-    end
-
-    if CONFIG.PORTALS_ENABLED then
-        openPortalAt(hitPos, hitNormal)
+        openPortalAt(hit.Position, hit.Normal)
+    elseif CONFIG.SKY_PORTALS then
+        openPortalAt(endPoint, -ray.Direction)
     end
 end
 
@@ -1030,9 +1241,8 @@ ms.Color = CONFIG.C_MAIN
 ms.Thickness = 2
 mbtn.Activated:Connect(fire)
 
---───────────── ПАНЕЛЬ (4 вкладки) ─────────────
+--───────────── ПАНЕЛЬ (4 вкладки, кредитка в каждой) ─────────────
 do
-    -- ПАРА ПОРТАЛОВ: оба лежат на земле (нормаль строго вверх)
     local function groundPortalUnder(char, excludeChars)
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         if not hrp then return nil end
@@ -1143,7 +1353,7 @@ do
 
     for i, name in ipairs(TAB_NAMES) do
         local b = Instance.new("TextButton")
-        b.Size = UDim2.new(1/4, -3, 0, 32)
+        b.Size = UDim2.new(1/4, -3, 0, 30)
         b.Position = UDim2.new((i-1)/4, 3, 0, 6)
         b.BackgroundColor3 = Color3.fromRGB(20, 40, 25)
         b.BackgroundTransparency = 0.2
@@ -1157,15 +1367,26 @@ do
         tabButtons[i] = b
 
         local c = Instance.new("Frame")
-        c.Size = UDim2.new(1, -12, 1, -50)
-        c.Position = UDim2.new(0, 6, 0, 44)
+        c.Size = UDim2.new(1, -12, 1, -48)
+        c.Position = UDim2.new(0, 6, 0, 42)
         c.BackgroundTransparency = 1
         c.Visible = false
         c.Parent = panel
         contents[i] = c
+
+        local cr = Instance.new("TextLabel")
+        cr.Size = UDim2.new(1, 0, 0, 14)
+        cr.Position = UDim2.new(0, 0, 1, -14)
+        cr.BackgroundTransparency = 1
+        cr.Text = "⚡ TG: RickPrimeScripts"
+        cr.Font = Enum.Font.GothamBold
+        cr.TextSize = 10
+        cr.TextColor3 = CONFIG.C_MAIN
+        cr.TextTransparency = 0.35
+        cr.Parent = c
     end
 
-    -- ═══ вкладка 1: игроки ═══
+    -- вкладка 1: игроки
     local nickBox = Instance.new("TextBox")
     nickBox.Size = UDim2.new(1, -6, 0, 32)
     nickBox.BackgroundColor3 = Color3.fromRGB(10, 22, 13)
@@ -1204,7 +1425,7 @@ do
     searchStatus.Parent = contents[1]
 
     local listFrame = Instance.new("ScrollingFrame")
-    listFrame.Size = UDim2.new(1, 0, 1, -88)
+    listFrame.Size = UDim2.new(1, 0, 1, -104)
     listFrame.Position = UDim2.new(0, 0, 0, 88)
     listFrame.BackgroundTransparency = 1
     listFrame.BorderSizePixel = 0
@@ -1278,7 +1499,7 @@ do
         end
     end
 
-    -- ═══ вкладка 2: телепорт в другой ПЛЕЙС по ID ═══
+    -- вкладка 2: плейс
     local placeBox = Instance.new("TextBox")
     placeBox.Size = UDim2.new(1, -6, 0, 32)
     placeBox.BackgroundColor3 = Color3.fromRGB(10, 22, 13)
@@ -1317,10 +1538,10 @@ do
     placeStatus.Parent = contents[2]
 
     local placeHelp = Instance.new("TextLabel")
-    placeHelp.Size = UDim2.new(1, -6, 0, 80)
+    placeHelp.Size = UDim2.new(1, -6, 0, 70)
     placeHelp.Position = UDim2.new(0, 0, 0, 96)
     placeHelp.BackgroundTransparency = 1
-    placeHelp.Text = "ID — число из ссылки на игру (roblox.com/games/ТАМ-АЙДИ/...). Переносит только тебя. Приватные плейсы без доступа не откроются."
+    placeHelp.Text = "ID — число из ссылки на игру (roblox.com/games/ТАМ-АЙДИ/...). Переносит только тебя."
     placeHelp.TextColor3 = CONFIG.C_MAIN
     placeHelp.TextTransparency = 0.3
     placeHelp.Font = Enum.Font.Gotham
@@ -1352,7 +1573,7 @@ do
         if enter then doPlaceTeleport() end
     end)
 
-    -- ═══ вкладка 3: очистка ═══
+    -- вкладка 3: очистка
     local statusLabel = Instance.new("TextLabel")
     statusLabel.Size = UDim2.new(1, 0, 0, 30)
     statusLabel.BackgroundTransparency = 1
@@ -1381,27 +1602,27 @@ do
     wipeBtn.Parent = contents[3]
     Instance.new("UICorner", wipeBtn).CornerRadius = UDim.new(0, 12)
     wipeBtn.Activated:Connect(function()
-        clearPortals() -- теперь плавно схлопываются
+        clearPortals()
         updateStatus()
     end)
 
-    -- ═══ вкладка 4: инфо ═══
+    -- вкладка 4: инфо
     local picHolder = Instance.new("Frame")
-    picHolder.Size = UDim2.fromOffset(90, 90)
+    picHolder.Size = UDim2.fromOffset(80, 80)
     picHolder.Position = UDim2.new(0.5, 0, 0, 2)
     picHolder.AnchorPoint = Vector2.new(0.5, 0)
     picHolder.BackgroundTransparency = 1
     picHolder.Parent = contents[4]
 
     local ringF = Instance.new("Frame")
-    ringF.Size = UDim2.fromOffset(84, 84)
+    ringF.Size = UDim2.fromOffset(74, 74)
     ringF.Position = UDim2.new(0.5, 0, 0.5, 0)
     ringF.AnchorPoint = Vector2.new(0.5, 0.5)
     ringF.BackgroundTransparency = 1
     ringF.Parent = picHolder
     Instance.new("UICorner", ringF).CornerRadius = UDim.new(1, 0)
     local ringStroke = Instance.new("UIStroke", ringF)
-    ringStroke.Thickness = 7
+    ringStroke.Thickness = 6
     ringStroke.Color = CONFIG.C_MAIN
     local ringGrad = Instance.new("UIGradient", ringStroke)
     ringGrad.Color = ColorSequence.new({
@@ -1411,7 +1632,7 @@ do
     })
 
     local inner = Instance.new("Frame")
-    inner.Size = UDim2.fromOffset(64, 64)
+    inner.Size = UDim2.fromOffset(54, 54)
     inner.Position = UDim2.new(0.5, 0, 0.5, 0)
     inner.AnchorPoint = Vector2.new(0.5, 0.5)
     inner.BackgroundColor3 = CONFIG.C_DEEP
@@ -1427,7 +1648,7 @@ do
     })
 
     local core = Instance.new("Frame")
-    core.Size = UDim2.fromOffset(18, 18)
+    core.Size = UDim2.fromOffset(16, 16)
     core.Position = UDim2.new(0.5, 0, 0.5, 0)
     core.AnchorPoint = Vector2.new(0.5, 0.5)
     core.BackgroundColor3 = CONFIG.C_CORE
@@ -1438,26 +1659,36 @@ do
     task.spawn(function()
         while gui.Parent do
             ringGrad.Rotation = (ringGrad.Rotation + 3) % 360
-            local pulse = 18 + math.sin(os.clock() * 4) * 3
+            local pulse = 16 + math.sin(os.clock() * 4) * 3
             core.Size = UDim2.fromOffset(pulse, pulse)
             task.wait(0.03)
         end
     end)
 
     local infoText = Instance.new("TextLabel")
-    infoText.Size = UDim2.new(1, -8, 0, 84)
-    infoText.Position = UDim2.new(0, 4, 0, 94)
+    infoText.Size = UDim2.new(1, -8, 0, 62)
+    infoText.Position = UDim2.new(0, 4, 0, 86)
     infoText.BackgroundTransparency = 1
-    infoText.Text = "• ЛКМ / 🟢 — портал в прицеле\n• «Игрок» / ник → пара порталов на земле\n• «Плейс» → перенос в другую игру по ID\n• Порталы живут 20 сек, закрываются плавно"
+    infoText.Text = "• ЛКМ / 🟢 — портал на поверхности (в пустоту — струя тает)\n• «Игрок» / ник → пара порталов на земле\n• Живут 20 сек, закрываются плавно"
     infoText.TextColor3 = CONFIG.C_CORE
     infoText.Font = Enum.Font.Gotham
     infoText.TextSize = 11
     infoText.TextWrapped = true
     infoText.Parent = contents[4]
 
+    local creditBig = Instance.new("TextLabel")
+    creditBig.Size = UDim2.new(1, -8, 0, 18)
+    creditBig.Position = UDim2.new(0, 4, 0, 150)
+    creditBig.BackgroundTransparency = 1
+    creditBig.Text = "⚡ TG: RickPrimeScripts"
+    creditBig.Font = Enum.Font.GothamBlack
+    creditBig.TextSize = 12
+    creditBig.TextColor3 = CONFIG.C_MAIN
+    creditBig.Parent = contents[4]
+
     local debugBtn = Instance.new("TextButton")
-    debugBtn.Size = UDim2.new(1, -8, 0, 26)
-    debugBtn.Position = UDim2.new(0, 4, 0, 180)
+    debugBtn.Size = UDim2.new(1, -8, 0, 24)
+    debugBtn.Position = UDim2.new(0, 4, 0, 170)
     debugBtn.BackgroundColor3 = Color3.fromRGB(20, 40, 25)
     debugBtn.TextSize = 11
     debugBtn.TextColor3 = CONFIG.C_MAIN
@@ -1478,7 +1709,6 @@ do
         refreshDebugText()
     end)
 
-    -- ═══ переключение вкладок ═══
     local function showTab(idx)
         for i = 1, 4 do
             contents[i].Visible = (i == idx)
@@ -1501,6 +1731,10 @@ do
 end
 
 --───────────── СТАРТ ─────────────
+task.spawn(function()
+    showSplash()
+end)
+
 buildAndGive()
 
 task.spawn(function()
@@ -1513,4 +1747,4 @@ LocalPlayer.CharacterAdded:Connect(function()
     clearPortals()
 end)
 
-print("[Portal Gun v24] Умный пробой (стекло = цель) + плавное закрытие везде + телепорт в плейс ✅")
+print("[Portal Gun v30] TG: RickPrimeScripts — Studio + опубликованная игра ✅")
