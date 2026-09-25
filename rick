@@ -1,0 +1,1516 @@
+--═══════════════════════════════════════════════════════════════════
+--  PORTAL GUN v24 — LocalScript
+--  Куда: StarterPlayer → StarterPlayerScripts
+--  НОВОЕ против v23:
+--   • УМНЫЙ ПРОБОЙ: невидимое (>=0.95) и прозрачный декор (неколлиз.
+--     >=0.5) пробивается. Стекло/решётки/витрины (плотные) — НЕТ,
+--     портал встаёт прямо на них. Раньше пробой 0.5 «съедал» стекло,
+--     а за границами карты был воздух → портал улетал в небо
+--   • ПЛАВНОЕ ЗАКРЫТИЕ ВЕЗДЕ: «Удалить порталы», замена портала
+--     новым выстрелом и 20-сек таймер — одна анимация схлопывания
+--   • ТЕЛЕПОРТ В ПЛЕЙС: вкладка «Плейс» → вводишь ID плейса → перенос
+--     (клиентский Teleport, работает только для себя)
+--═══════════════════════════════════════════════════════════════════
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local Debris           = game:GetService("Debris")
+local Lighting         = game:GetService("Lighting")
+local TeleportService  = game:GetService("TeleportService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera      = workspace.CurrentCamera
+
+--───────────── НАСТРОЙКИ ─────────────
+local CONFIG = {
+    GUN_ID   = 13392984071,
+    GUN_NAME = "Portal Gun",
+
+    SCALE    = 0.665,
+    GRIP_POS = Vector3.new(-0.417, 0.000, 0.500),
+    GRIP_ROT = Vector3.new(0, -90, 90),
+
+    FIRE_COOLDOWN = 0.7,
+    MAX_RANGE     = 500,
+    SKY_RANGE     = 120,
+
+    DEBUG_AIM = false,
+
+    PORTALS_ENABLED = true,
+    PORTAL_LIFETIME = 20,
+    TP_COOLDOWN     = 1.2,
+
+    PORTAL_MODEL_ID = "rbxassetid://92778664168797",
+    PORTAL_SIZE     = 6,
+    PORTAL_SPIN     = 60,
+
+    SOUND_FIRE = "",
+    SOUND_OPEN = "rbxassetid://1013378689",
+    SOUND_TP   = "rbxassetid://1013378689",
+    VOLUME     = 1,
+
+    C_CORE = Color3.fromRGB(225, 255, 170),
+    C_MAIN = Color3.fromRGB(150, 235, 70),
+    C_DEEP = Color3.fromRGB(70, 160, 25),
+}
+
+--───────────── ПЛАВНОСТЬ ─────────────
+local function easeOutCubic(t)  return 1 - (1 - t) ^ 3 end
+local function easeInCubic(t)   return t ^ 3 end
+local function easeInOutSine(t) return -(math.cos(math.pi * t) - 1) / 2 end
+local function easeOutBack(t, c)
+    c = c or 1.2
+    local u = t - 1
+    return 1 + (c + 1) * u * u * u + c * u * u
+end
+
+--───────────── ЗВУК ─────────────
+local function playSoundAt(pos, id, pitch)
+    if id == "" then return end
+    local holder = Instance.new("Part")
+    holder.Size = Vector3.new(0.2, 0.2, 0.2)
+    holder.Transparency = 1
+    holder.Anchored = true
+    holder.CanCollide = false
+    holder.CanQuery = false
+    holder.CanTouch = false
+    holder.CFrame = CFrame.new(pos)
+    holder.Parent = workspace
+    local s = Instance.new("Sound")
+    s.SoundId = id
+    s.PlaybackSpeed = pitch or 1
+    s.Volume = CONFIG.VOLUME
+    s.Parent = holder
+    s:Play()
+    Debris:AddItem(holder, 5)
+end
+
+--───────────── ЗАГРУЗКА АССЕТОВ ─────────────
+local function loadAsset(id)
+    local ok, result = pcall(function()
+        return game:GetObjects(id)
+    end)
+    if not ok or type(result) ~= "table" or #result == 0 then
+        return nil
+    end
+    for _, obj in ipairs(result) do
+        if obj:IsA("Model") or obj:IsA("BasePart") or obj:IsA("Accoutrement") then
+            return obj
+        end
+    end
+    return result[1]
+end
+
+--───────────── ШАБЛОН ПОРТАЛА ─────────────
+local portalTemplate = nil
+local portalTemplateTried = false
+
+local function getPortalTemplate()
+    if portalTemplateTried then return portalTemplate end
+    portalTemplateTried = true
+
+    local asset = loadAsset(CONFIG.PORTAL_MODEL_ID)
+    if not asset then
+        warn("[Portal Gun] МОДЕЛЬ ПОРТАЛА не загрузилась → fallback")
+        return nil
+    end
+
+    local container = Instance.new("Model")
+    container.Name = "PortalTemplate"
+    asset.Parent = container
+
+    for _, d in ipairs(container:GetDescendants()) do
+        if d:IsA("BaseScript") or d:IsA("Sound") then d:Destroy() end
+        if d:IsA("BasePart") then
+            d.Anchored = true
+            d.CanCollide = false
+            d.CanTouch = false
+            d.CanQuery = false
+        end
+    end
+
+    portalTemplate = container
+    print("[Portal Gun] Модель портала загружена ✅")
+    return portalTemplate
+end
+
+--───────────── МАСШТАБ + КРУГЛОСТЬ ─────────────
+local function forceScaleAndCircle(clone, targetSize)
+    local _, size = clone:GetBoundingBox()
+    local maxDim = math.max(size.X, size.Y, size.Z)
+    if maxDim < 0.01 then return end
+
+    local ok = pcall(function() clone:ScaleTo(targetSize / maxDim) end)
+    if not ok then
+        local k = targetSize / maxDim
+        for _, d in ipairs(clone:GetDescendants()) do
+            if d:IsA("BasePart") then d.Size = d.Size * k end
+            if d:IsA("SpecialMesh") then d.Scale = d.Scale * k end
+        end
+    end
+
+    local bbCF, size2 = clone:GetBoundingBox()
+    if math.abs(size2.X - size2.Y) > 0.05 then
+        local kx, ky = 1, 1
+        if size2.X < size2.Y then
+            kx = size2.Y / size2.X
+        else
+            ky = size2.X / size2.Y
+        end
+        for _, d in ipairs(clone:GetDescendants()) do
+            if d:IsA("BasePart") then
+                local rel = bbCF:ToObjectSpace(d.CFrame)
+                local p = rel.Position
+                d.CFrame = bbCF * CFrame.new(p.X * kx, p.Y * ky, p.Z) * rel.Rotation
+                d.Size = Vector3.new(d.Size.X * kx, d.Size.Y * ky, d.Size.Z)
+            elseif d:IsA("SpecialMesh") then
+                d.Scale = Vector3.new(d.Scale.X * kx, d.Scale.Y * ky, d.Scale.Z)
+            end
+        end
+    end
+
+    local cf = clone:GetBoundingBox()
+    local pv = clone:GetPivot()
+    clone:PivotTo(CFrame.new(cf.Position) * pv.Rotation)
+end
+
+--───────────── КОЛЬЦО-УДАРНАЯ ВОЛНА ─────────────
+local function spawnRing(pos, normal, color, endDiam, dur)
+    local ring = Instance.new("Part")
+    ring.Shape = Enum.PartType.Cylinder
+    ring.Size = Vector3.new(0.15, 0.6, 0.6)
+    ring.Material = Enum.Material.Neon
+    ring.Color = color
+    ring.Transparency = 0.05
+    ring.Anchored = true
+    ring.CanCollide = false
+    ring.CanQuery = false
+    ring.CanTouch = false
+    ring.CFrame = CFrame.lookAt(pos + normal * 0.2, pos + normal * 2)
+        * CFrame.Angles(0, math.rad(90), 0)
+    ring.Parent = workspace
+    TweenService:Create(ring, TweenInfo.new(dur, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+        Size = Vector3.new(0.15, endDiam, endDiam),
+        Transparency = 1,
+    }):Play()
+    Debris:AddItem(ring, dur + 0.1)
+end
+
+--───────────── СБОРКА ПУШКИ ─────────────
+local currentTool = nil
+local equippedTool = nil
+local fireBusy = false
+
+local function buildAndGive()
+    if currentTool then pcall(function() currentTool:Destroy() end) end
+    equippedTool = nil
+
+    local asset = loadAsset("rbxassetid://" .. CONFIG.GUN_ID)
+    if not asset then
+        warn("[Gun] НЕ ЗАГРУЗИЛОСЬ по ID " .. CONFIG.GUN_ID)
+        return
+    end
+
+    local mainModel = Instance.new("Model")
+    mainModel.Name = "GunParts"
+    asset.Parent = mainModel
+
+    for _, d in ipairs(mainModel:GetDescendants()) do
+        if d:IsA("BaseScript") or d:IsA("Sound") then d:Destroy() end
+    end
+    for _, d in ipairs(mainModel:GetDescendants()) do
+        if d:IsA("BasePart") then
+            d.Anchored = false
+            d.CanCollide = false
+            d.CanTouch = false
+            d.CanQuery = false
+            d.Massless = true
+        end
+    end
+
+    pcall(function() mainModel:ScaleTo(CONFIG.SCALE) end)
+
+    local bbCF = mainModel:GetBoundingBox()
+    local handle = Instance.new("Part")
+    handle.Name = "Handle"
+    handle.Size = Vector3.new(0.4, 0.4, 0.4)
+    handle.Transparency = 1
+    handle.CanCollide = false
+    handle.CanTouch = false
+    handle.CanQuery = false
+    handle.Massless = true
+    handle.CFrame = bbCF
+
+    local tool = Instance.new("Tool")
+    tool.Name = CONFIG.GUN_NAME
+    tool.RequiresHandle = true
+    tool.CanBeDropped = false
+    tool.ToolTip = "Портальная пушка [ЛКМ]"
+
+    handle.Parent = tool
+    mainModel.Parent = tool
+
+    for _, d in ipairs(mainModel:GetDescendants()) do
+        if d:IsA("BasePart") and d ~= handle then
+            local wc = Instance.new("WeldConstraint")
+            wc.Part0 = handle
+            wc.Part1 = d
+            wc.Parent = handle
+        end
+    end
+
+    tool.Grip = CFrame.new(CONFIG.GRIP_POS)
+        * CFrame.Angles(
+            math.rad(CONFIG.GRIP_ROT.X),
+            math.rad(CONFIG.GRIP_ROT.Y),
+            math.rad(CONFIG.GRIP_ROT.Z))
+
+    tool.Parent = LocalPlayer:WaitForChild("Backpack")
+    currentTool = tool
+
+    tool.Equipped:Connect(function() equippedTool = tool end)
+    tool.Unequipped:Connect(function()
+        if equippedTool == tool then equippedTool = nil end
+    end)
+
+    local farPart, farDist = nil, 0
+    for _, d in ipairs(mainModel:GetDescendants()) do
+        if d:IsA("BasePart") then
+            local dist = (d.Position - handle.Position).Magnitude
+            if dist > farDist then farPart, farDist = d, dist end
+        end
+    end
+    tool:SetAttribute("MuzzlePart", farPart and farPart.Name or "")
+end
+
+--───────────── КРЕСТИК ─────────────
+local crossGui = Instance.new("ScreenGui")
+crossGui.Name = "PGCrosshair"
+crossGui.ResetOnSpawn = false
+crossGui.IgnoreGuiInset = true
+crossGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local crossCircle = Instance.new("Frame")
+crossCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+crossCircle.Size = UDim2.fromOffset(16, 16)
+crossCircle.BackgroundTransparency = 1
+crossCircle.Visible = false
+crossCircle.Parent = crossGui
+local ccStroke = Instance.new("UIStroke", crossCircle)
+ccStroke.Color = CONFIG.C_MAIN
+ccStroke.Thickness = 1.5
+ccStroke.Transparency = 0.25
+Instance.new("UICorner", crossCircle).CornerRadius = UDim.new(1, 0)
+
+local crossDot = Instance.new("Frame")
+crossDot.AnchorPoint = Vector2.new(0.5, 0.5)
+crossDot.Size = UDim2.fromOffset(4, 4)
+crossDot.BackgroundColor3 = CONFIG.C_CORE
+crossDot.BorderSizePixel = 0
+crossDot.Visible = false
+crossDot.Parent = crossGui
+Instance.new("UICorner", crossDot).CornerRadius = UDim.new(1, 0)
+
+RunService.RenderStepped:Connect(function()
+    local show = equippedTool ~= nil and equippedTool.Parent == LocalPlayer.Character
+    crossCircle.Visible = show
+    crossDot.Visible = show
+    if show then
+        local m
+        if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then
+            m = Camera.ViewportSize / 2
+        else
+            m = UserInputService:GetMouseLocation()
+        end
+        crossCircle.Position = UDim2.fromOffset(m.X, m.Y)
+        crossDot.Position = UDim2.fromOffset(m.X, m.Y)
+    end
+end)
+
+--───────────── ПОРТАЛЫ: СОСТОЯНИЕ ─────────────
+local portalA, portalB = nil, nil
+local tpCooldown = 0
+
+local portalsChangedCallback = nil
+local function notifyPortalsChanged()
+    if portalsChangedCallback then
+        pcall(portalsChangedCallback)
+    end
+end
+
+local function releasePortalData(d)
+    local changed = false
+    if portalA == d then portalA = nil changed = true end
+    if portalB == d then portalB = nil changed = true end
+    if changed then notifyPortalsChanged() end
+end
+
+-- Очистка: теперь ПЛАВНОЕ закрытие, а не мгновенный Destroy
+local function clearPortals()
+    for _, p in ipairs({ portalA, portalB }) do
+        if p then
+            if p.close then
+                task.spawn(p.close)
+            elseif p.model.Parent then
+                p.model:Destroy()
+            end
+        end
+    end
+    portalA, portalB = nil, nil
+    notifyPortalsChanged()
+end
+
+local function claimPortalSlot()
+    if not portalA then return "A" end
+    if not portalB then return "B" end
+    -- вытесняемый портал тоже закрывается ПЛАВНО
+    local old = portalA
+    portalA = portalB
+    portalB = nil
+    if old and old.close then
+        task.spawn(old.close)
+    elseif old and old.model.Parent then
+        old.model:Destroy()
+    end
+    return "B"
+end
+
+--───────────── FALLBACK ─────────────
+local function buildFallbackVisual(parentModel, pos, normal, size)
+    local ring = Instance.new("Part")
+    ring.Name = "FallbackRing"
+    ring.Shape = Enum.PartType.Cylinder
+    ring.Material = Enum.Material.Neon
+    ring.Color = CONFIG.C_MAIN
+    ring.Anchored = true
+    ring.CanCollide = false
+    ring.CanQuery = false
+    ring.CanTouch = false
+    ring.CFrame = CFrame.lookAt(pos + normal * 0.05, pos + normal * 2)
+        * CFrame.Angles(0, math.rad(90), 0)
+    ring.Parent = parentModel
+
+    local swirl = Instance.new("Part")
+    swirl.Name = "FallbackSwirl"
+    swirl.Shape = Enum.PartType.Cylinder
+    swirl.Material = Enum.Material.Glass
+    swirl.Color = CONFIG.C_DEEP
+    swirl.Transparency = 0.2
+    swirl.Reflectance = 0.35
+    swirl.Anchored = true
+    swirl.CanCollide = false
+    swirl.CanQuery = false
+    swirl.CanTouch = false
+    swirl.CFrame = ring.CFrame
+    swirl.Parent = parentModel
+
+    ring.Size = Vector3.new(0.25, 0.5, 0.5)
+    swirl.Size = Vector3.new(0.12, 0.4, 0.4)
+    TweenService:Create(ring, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        { Size = Vector3.new(0.25, size, size) }):Play()
+    TweenService:Create(swirl, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        { Size = Vector3.new(0.12, size * 0.85, size * 0.85) }):Play()
+end
+
+--───────────── ОТКРЫТИЕ / ПЛАВНОЕ ЗАКРЫТИЕ ПОРТАЛА ─────────────
+local OPEN_DUR  = 0.45
+local CLOSE_DUR = 0.45
+
+local function openPortalAt(pos, normal)
+    local slot = claimPortalSlot()
+    playSoundAt(pos, CONFIG.SOUND_OPEN, 1)
+
+    local holder = Instance.new("Model")
+    holder.Name = "Portal_" .. slot
+    holder.Parent = workspace
+
+    local data = { model = holder, pos = pos, normal = normal, closed = false }
+
+    local template = getPortalTemplate()
+    local placed = false
+
+    if template then
+        local clone = template:Clone()
+        clone.Parent = holder
+
+        forceScaleAndCircle(clone, CONFIG.PORTAL_SIZE)
+
+        local targetCF = CFrame.lookAt(pos + normal * 0.05, pos + normal * 2)
+        clone:PivotTo(targetCF)
+
+        local parts = {}
+        for _, d in ipairs(clone:GetDescendants()) do
+            if d:IsA("BasePart") then
+                parts[#parts + 1] = {
+                    part = d,
+                    rel  = targetCF:ToObjectSpace(d.CFrame),
+                    size = d.Size,
+                    tr   = d.Transparency,
+                }
+            end
+        end
+
+        local function applyPose(s, vis, ang)
+            local pv = targetCF * CFrame.Angles(0, 0, ang)
+            clone:PivotTo(pv)
+            for _, e in ipairs(parts) do
+                local p = e.part
+                if p.Parent then
+                    local lp = e.rel.Position
+                    p.CFrame = pv * CFrame.new(lp.X * s, lp.Y * s, lp.Z) * e.rel.Rotation
+                    p.Size = Vector3.new(
+                        math.max(e.size.X * s, 0.01),
+                        math.max(e.size.Y * s, 0.01),
+                        e.size.Z)
+                    p.Transparency = 1 - (1 - e.tr) * vis
+                end
+            end
+        end
+
+        applyPose(0.01, 0, 0)
+        spawnRing(pos, normal, CONFIG.C_CORE, CONFIG.PORTAL_SIZE * 1.35, 0.5)
+
+        local flashPart = Instance.new("Part")
+        flashPart.Size = Vector3.new(0.2, 0.2, 0.2)
+        flashPart.Transparency = 1
+        flashPart.Anchored = true
+        flashPart.CanCollide = false
+        flashPart.CanQuery = false
+        flashPart.CanTouch = false
+        flashPart.CFrame = CFrame.new(pos + normal * 0.4)
+        flashPart.Parent = holder
+
+        local openLight = Instance.new("PointLight")
+        openLight.Color = CONFIG.C_MAIN
+        openLight.Range = 20
+        openLight.Brightness = 8
+        openLight.Parent = flashPart
+        TweenService:Create(openLight, TweenInfo.new(0.5), { Brightness = 0 }):Play()
+
+        local angle = 0
+
+        -- ЕДИНАЯ анимация закрытия: работает и по кнопке «Удалить»,
+        -- и при замене новым порталом, и по 20-сек таймеру
+        data.close = function()
+            if data.closed then return end
+            data.closed = true
+            releasePortalData(data)
+            if not holder.Parent then return end
+
+            spawnRing(pos, normal, CONFIG.C_CORE, CONFIG.PORTAL_SIZE, 0.4)
+            playSoundAt(pos, CONFIG.SOUND_OPEN, 1.3)
+
+            local ct0 = os.clock()
+            while holder.Parent do
+                local t = math.min((os.clock() - ct0) / CLOSE_DUR, 1)
+                local s = 1 - easeInCubic(t)
+                applyPose(math.max(s, 0.01), 1 - t, angle)
+                if t >= 1 then break end
+                RunService.Heartbeat:Wait()
+            end
+            if holder.Parent then holder:Destroy() end
+        end
+
+        task.spawn(function()
+            -- открытие
+            local t0 = os.clock()
+            local last = t0
+            while true do
+                local now = os.clock()
+                local dt = now - last
+                last = now
+                local t = math.min((now - t0) / OPEN_DUR, 1)
+                local s = easeOutBack(t, 1.2)
+                local vis = math.min(s, 1)
+
+                angle = angle + math.rad(CONFIG.PORTAL_SPIN) * dt * math.min(s, 1.2)
+                applyPose(s, vis, angle)
+
+                if t >= 1 then break end
+                RunService.Heartbeat:Wait()
+            end
+            applyPose(1, 1, angle)
+
+            -- жизнь: крутится до конца времени (минус запас на закрытие)
+            local bornAt = os.clock()
+            while clone.Parent and not data.closed
+                and (os.clock() - bornAt) < (CONFIG.PORTAL_LIFETIME - CLOSE_DUR) do
+                local dt = task.wait(0.03)
+                angle = angle + math.rad(CONFIG.PORTAL_SPIN) * dt
+                clone:PivotTo(targetCF * CFrame.Angles(0, 0, angle))
+            end
+
+            if clone.Parent then
+                data.close() -- естественное закрытие по таймеру
+            end
+        end)
+
+        placed = true
+    end
+
+    if not placed then
+        buildFallbackVisual(holder, pos, normal, CONFIG.PORTAL_SIZE)
+        data.close = function()
+            if data.closed then return end
+            data.closed = true
+            releasePortalData(data)
+            if holder.Parent then holder:Destroy() end
+        end
+        task.delay(CONFIG.PORTAL_LIFETIME, function()
+            if holder.Parent then data.close() end
+        end)
+    end
+
+    local lightPart = Instance.new("Part")
+    lightPart.Size = Vector3.new(0.2, 0.2, 0.2)
+    lightPart.Transparency = 1
+    lightPart.Anchored = true
+    lightPart.CanCollide = false
+    lightPart.CanQuery = false
+    lightPart.CanTouch = false
+    lightPart.CFrame = CFrame.new(pos + normal * 0.6)
+    lightPart.Parent = holder
+
+    local light = Instance.new("PointLight")
+    light.Color = CONFIG.C_MAIN
+    light.Range = 16
+    light.Brightness = 2.5
+    light.Parent = lightPart
+
+    Debris:AddItem(holder, CONFIG.PORTAL_LIFETIME + 3)
+
+    data.slot = slot
+    if slot == "A" then portalA = data else portalB = data end
+    notifyPortalsChanged()
+end
+
+--───────────── ТЕЛЕПОРТ: ПРОХОД ─────────────
+local tpAnimBusy = false
+
+local function restoreCollisions(saved)
+    for part, v in pairs(saved) do
+        if part.Parent then part.CanCollide = v end
+    end
+end
+
+local function teleportThrough(from, to)
+    tpCooldown = os.clock() + CONFIG.TP_COOLDOWN
+
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hrp then tpAnimBusy = false return end
+
+    local entrySpeed = hrp.AssemblyLinearVelocity.Magnitude
+    local startCF = hrp.CFrame
+
+    playSoundAt(hrp.Position, CONFIG.SOUND_TP, 0.9)
+
+    local saved = {}
+    for _, d in ipairs(char:GetDescendants()) do
+        if d:IsA("BasePart") then
+            saved[d] = d.CanCollide
+            d.CanCollide = false
+        end
+    end
+    hrp.Anchored = true
+    hrp.AssemblyLinearVelocity = Vector3.zero
+
+    local baseFOV = Camera.FieldOfView
+    local blur = Instance.new("BlurEffect")
+    blur.Size = 0
+    blur.Parent = Lighting
+
+    local n = from.normal
+    local r = n:Cross(Vector3.yAxis)
+    r = r.Magnitude > 0.05 and r.Unit or Vector3.xAxis
+    local u = r:Cross(n).Unit
+
+    local dist = (startCF.Position - from.pos).Magnitude
+    local pullDur = math.clamp(dist / 16, 0.12, 0.4)
+
+    TweenService:Create(Camera,
+        TweenInfo.new(pullDur, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+        { FieldOfView = baseFOV + 16 }):Play()
+
+    local t0 = os.clock()
+    while true do
+        local t = (os.clock() - t0) / pullDur
+        local dead = (not hrp.Parent) or (hum and hum.Health <= 0)
+        if t >= 1 or dead then break end
+
+        local e = easeInCubic(math.min(t, 1))
+        local pos = startCF.Position:Lerp(from.pos, e)
+
+        local amp = math.sin(e * math.pi) * 0.8
+        local ang = e * 5.5
+        pos = pos + r * (math.cos(ang) * amp) + u * (math.sin(ang) * amp)
+
+        hrp.CFrame = CFrame.new(pos) * startCF.Rotation
+        blur.Size = 14 * e
+        RunService.Heartbeat:Wait()
+    end
+
+    local dead = (not hrp.Parent) or (hum and hum.Health <= 0)
+    if dead then
+        if hrp.Parent then hrp.Anchored = false end
+        restoreCollisions(saved)
+        TweenService:Create(Camera, TweenInfo.new(0.3), { FieldOfView = baseFOV }):Play()
+        blur:Destroy()
+        tpAnimBusy = false
+        return
+    end
+
+    spawnRing(from.pos, from.normal, CONFIG.C_MAIN, 7, 0.3)
+
+    local exitDir = to.normal
+    if math.abs(exitDir.Y) > 0.9 then
+        local flat = startCF.LookVector * Vector3.new(1, 0, 1)
+        exitDir = flat.Magnitude > 0.05 and flat.Unit or Vector3.new(0, 0, -1)
+    end
+
+    local exitDist = CONFIG.PORTAL_SIZE * 0.5 + 1.4
+    local exitStartPos = to.pos + to.normal * 0.1
+    local exitEndPos = to.pos + to.normal * exitDist
+    local startRot = startCF.Rotation
+    local exitRot = CFrame.lookAt(Vector3.zero, exitDir)
+
+    playSoundAt(to.pos, CONFIG.SOUND_TP, 1.2)
+    spawnRing(to.pos, to.normal, CONFIG.C_MAIN, 7, 0.3)
+
+    TweenService:Create(Camera,
+        TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        { FieldOfView = baseFOV }):Play()
+    TweenService:Create(blur, TweenInfo.new(0.4), { Size = 0 }):Play()
+    Debris:AddItem(blur, 0.5)
+
+    local exitDur = 0.32
+    local t1 = os.clock()
+    while true do
+        local t = (os.clock() - t1) / exitDur
+        local dead2 = (not hrp.Parent) or (hum and hum.Health <= 0)
+        if t >= 1 or dead2 then break end
+
+        local e = easeOutCubic(math.min(t, 1))
+        local pos = exitStartPos:Lerp(exitEndPos, e)
+        local rot = startRot:Lerp(exitRot, e)
+        hrp.CFrame = CFrame.new(pos) * rot
+        RunService.Heartbeat:Wait()
+    end
+
+    if hrp.Parent then
+        hrp.CFrame = CFrame.new(exitEndPos) * startRot:Lerp(exitRot, 1)
+        local outSpeed = math.clamp(entrySpeed * 0.85, 10, 120)
+        hrp.Anchored = false
+        hrp.AssemblyLinearVelocity = (exitDir + to.normal * 0.45).Unit * outSpeed
+    end
+
+    restoreCollisions(saved)
+    tpAnimBusy = false
+end
+
+task.spawn(function()
+    while true do
+        task.wait(0.05)
+        if portalA and not portalA.model.Parent then portalA = nil notifyPortalsChanged() end
+        if portalB and not portalB.model.Parent then portalB = nil notifyPortalsChanged() end
+
+        if CONFIG.PORTALS_ENABLED and portalA and portalB
+            and not tpAnimBusy and os.clock() > tpCooldown then
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                for _, pair in ipairs({ {portalA, portalB}, {portalB, portalA} }) do
+                    local from, to = pair[1], pair[2]
+
+                    local off = hrp.Position - from.pos
+                    local alongN = off:Dot(from.normal)
+                    local radial = (off - from.normal * alongN).Magnitude
+                    local depthWindow = (math.abs(from.normal.Y) > 0.7) and 3.6 or 1.8
+
+                    if alongN > -0.8 and alongN < depthWindow
+                        and radial < CONFIG.PORTAL_SIZE * 0.5 + 1 then
+                        tpAnimBusy = true
+                        task.spawn(teleportThrough, from, to)
+                        break
+                    end
+                end
+            end
+        end
+    end
+end)
+
+--───────────── ОТЛАДОЧНАЯ МЕТКА ─────────────
+local debugAim = CONFIG.DEBUG_AIM
+
+local function debugMarker(pos)
+    local d = Instance.new("Part")
+    d.Shape = Enum.PartType.Ball
+    d.Size = Vector3.new(0.4, 0.4, 0.4)
+    d.Material = Enum.Material.Neon
+    d.Color = Color3.fromRGB(255, 60, 60)
+    d.Anchored = true
+    d.CanCollide = false
+    d.CanQuery = false
+    d.CanTouch = false
+    d.CFrame = CFrame.new(pos)
+    d.Parent = workspace
+    Debris:AddItem(d, 1.2)
+end
+
+--───────────── УМНОЕ ПРАВИЛО ПРОБОЯ ─────────────
+-- • полностью невидимое (Transparency >= 0.95): барьеры, границы,
+--   хитбоксы — ВСЕГДА пробиваем
+-- • прозрачный декор (CanCollide = false, прозрачность >= 0.5):
+--   дымы, эффекты — пробиваем
+-- • ПЛОТНЫЕ полупрозрачные (CanCollide = true): стекло, решётки,
+--   витрины — НЕ пробиваем, портал встаёт прямо на них
+local function isGhost(inst)
+    if not inst:IsA("BasePart") or inst == workspace.Terrain then
+        return false
+    end
+    if inst.Transparency >= 0.95 then
+        return true
+    end
+    if not inst.CanCollide and inst.Transparency >= 0.5 then
+        return true
+    end
+    return false
+end
+
+--───────────── ПРИЦЕЛИВАНИЕ ─────────────
+local function computeAim(char)
+    local camPos = Camera.CFrame.Position
+
+    local m
+    if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then
+        m = Camera.ViewportSize / 2
+    else
+        m = UserInputService:GetMouseLocation()
+    end
+    local ray = Camera:ViewportPointToRay(m.X, m.Y)
+
+    local exclude = { char }
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl ~= LocalPlayer and pl.Character then
+            table.insert(exclude, pl.Character)
+        end
+    end
+
+    local list = table.clone(exclude)
+    local o, remaining = camPos, CONFIG.MAX_RANGE
+
+    for _ = 1, 24 do
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = list
+        params.IgnoreWater = true
+
+        local hit = workspace:Raycast(o, ray.Direction * remaining, params)
+        if not hit then break end
+
+        if isGhost(hit.Instance) then
+            if debugAim then
+                print(("[Portal Gun] пробито: %s (прозрачность %.2f, коллизия %s)")
+                    :format(hit.Instance:GetFullName(),
+                        hit.Instance.Transparency, tostring(hit.Instance.CanCollide)))
+            end
+            table.insert(list, hit.Instance)
+            local used = (hit.Position - o).Magnitude + 0.05
+            o = hit.Position + ray.Direction * 0.05
+            remaining = remaining - used
+            if remaining <= 0.05 then break end
+        else
+            if debugAim then debugMarker(hit.Position) end
+            return hit.Position, hit, ray
+        end
+    end
+
+    local skyPoint = camPos + ray.Direction * CONFIG.SKY_RANGE
+    if debugAim then debugMarker(skyPoint) end
+    return skyPoint, nil, ray
+end
+
+--───────────── ЖИДКАЯ СТРУЯ ─────────────
+local function drawLiquidTracer(origin, aimPoint)
+    local dir = (aimPoint - origin)
+    local length = dir.Magnitude
+    dir = dir.Unit
+
+    local right = dir:Cross(Vector3.yAxis)
+    right = right.Magnitude > 0.05 and right.Unit or Vector3.xAxis
+    local up = right:Cross(dir).Unit
+
+    local holder = Instance.new("Model")
+    holder.Name = "PG_Tracer"
+    holder.Parent = workspace
+
+    local SEGS = 8
+    local atts = {}
+    for i = 0, SEGS do
+        local p = origin + dir * (length * i / SEGS)
+        local a = Instance.new("Attachment")
+        a.WorldPosition = p
+        a.Parent = workspace.Terrain
+        atts[i] = a
+    end
+
+    local basePos = {}
+    for i = 0, SEGS do
+        basePos[i] = atts[i].WorldPosition
+    end
+
+    local coreBeams, midBeams, outBeams = {}, {}, {}
+    local W = 0.55
+    for i = 0, SEGS - 1 do
+        local function mk(w, col, emis, transp)
+            local b = Instance.new("Beam")
+            b.Attachment0 = atts[i]
+            b.Attachment1 = atts[i + 1]
+            b.Width0 = w
+            b.Width1 = w
+            b.Color = col
+            b.LightEmission = emis
+            b.LightInfluence = 0
+            b.FaceCamera = true
+            b.Segments = 1
+            b.Transparency = transp
+            b.Parent = holder
+            return b
+        end
+        coreBeams[i] = mk(W * 0.27, ColorSequence.new(CONFIG.C_CORE), 1, NumberSequence.new(0))
+        midBeams[i]  = mk(W, ColorSequence.new(CONFIG.C_MAIN, CONFIG.C_DEEP), 1, NumberSequence.new(0.15))
+        outBeams[i]  = mk(W * 2.27, ColorSequence.new(CONFIG.C_DEEP), 0.6, NumberSequence.new(0.85))
+        midBeams[i].Texture = "rbxasset://textures/particles/sparkles_main.dds"
+        midBeams[i].TextureMode = Enum.TextureMode.Wrap
+        midBeams[i].TextureLength = 2.5
+        midBeams[i].TextureSpeed = 3
+    end
+
+    local droplets = {}
+    for _, i in ipairs({ 2, 4, 6 }) do
+        local em = Instance.new("ParticleEmitter")
+        em.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+        em.Color = ColorSequence.new(CONFIG.C_MAIN, CONFIG.C_DEEP)
+        em.LightEmission = 1
+        em.Size = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 0.18),
+            NumberSequenceKeypoint.new(1, 0),
+        })
+        em.Transparency = NumberSequence.new(0.1, 1)
+        em.Lifetime = NumberRange.new(0.25, 0.5)
+        em.Rate = 40
+        em.Speed = NumberRange.new(1, 3)
+        em.SpreadAngle = Vector2.new(180, 180)
+        em.Acceleration = Vector3.new(0, -18, 0)
+        em.Parent = atts[i]
+        table.insert(droplets, em)
+    end
+
+    local LIFE = 0.45
+    local ATTACK, SUSTAIN_END = 0.14, 0.5
+    local AMP = 0.5
+
+    task.spawn(function()
+        local t0 = os.clock()
+        while holder.Parent do
+            local el = os.clock() - t0
+            local a = math.clamp(el / LIFE, 0, 1)
+
+            local alpha
+            if a < ATTACK then
+                alpha = easeOutCubic(a / ATTACK)
+            elseif a < SUSTAIN_END then
+                alpha = 1
+            else
+                alpha = 1 - easeInOutSine((a - SUSTAIN_END) / (1 - SUSTAIN_END))
+            end
+
+            local waveT = el * 14
+            for i = 1, SEGS - 1 do
+                local frac = i / SEGS
+                local envelope = math.sin(frac * math.pi)
+                local off = right * (math.sin(waveT + frac * 6) * AMP * envelope)
+                    + up * (math.cos(waveT * 0.8 + frac * 5) * AMP * 0.5 * envelope)
+                atts[i].WorldPosition = basePos[i] + off * alpha
+            end
+
+            local w = alpha * (1 + math.sin(el * 26) * 0.07)
+            for i = 0, SEGS - 1 do
+                coreBeams[i].Width0 = W * 0.27 * w
+                coreBeams[i].Width1 = W * 0.27 * w
+                midBeams[i].Width0 = W * w
+                midBeams[i].Width1 = W * w
+                outBeams[i].Width0 = W * 2.27 * w
+                outBeams[i].Width1 = W * 2.27 * w
+
+                coreBeams[i].Transparency = NumberSequence.new(math.clamp(1 - alpha, 0, 1))
+                midBeams[i].Transparency = NumberSequence.new(math.clamp(1 - alpha * 0.82, 0, 1))
+                outBeams[i].Transparency = NumberSequence.new(math.clamp(1 - alpha * 0.18, 0, 1))
+            end
+
+            for _, em in ipairs(droplets) do
+                em.Rate = 40 * alpha
+            end
+
+            if a >= 1 then break end
+            RunService.Heartbeat:Wait()
+        end
+        holder:Destroy()
+    end)
+
+    Debris:AddItem(holder, 1)
+end
+
+--───────────── ВЫСТРЕЛ ─────────────
+local function fire()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return end
+    if not (equippedTool and equippedTool == currentTool
+        and equippedTool.Parent == char) then return end
+
+    if fireBusy then return end
+    fireBusy = true
+    task.delay(CONFIG.FIRE_COOLDOWN, function() fireBusy = false end)
+
+    local aimPoint, hit, ray = computeAim(char)
+
+    local muzzleName = currentTool:GetAttribute("MuzzlePart") or ""
+    local muzzle = muzzleName ~= "" and char:FindFirstChild(muzzleName, true) or nil
+    local origin
+    if muzzle then
+        origin = muzzle.Position
+    else
+        local arm = char:FindFirstChild("Right Arm") or char:FindFirstChild("RightHand")
+        origin = arm and arm.Position or char:GetPivot().Position
+    end
+
+    playSoundAt(origin, CONFIG.SOUND_FIRE, 1)
+    drawLiquidTracer(origin, aimPoint)
+
+    local hitPos, hitNormal
+    if hit then
+        hitPos, hitNormal = hit.Position, hit.Normal
+    else
+        hitPos, hitNormal = aimPoint, -ray.Direction
+    end
+
+    if CONFIG.PORTALS_ENABLED then
+        openPortalAt(hitPos, hitNormal)
+    end
+end
+
+--───────────── ВВОД ─────────────
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        fire()
+    end
+end)
+
+local mbtn = Instance.new("TextButton")
+mbtn.Size = UDim2.fromOffset(90, 90)
+mbtn.Position = UDim2.new(1, -110, 1, -110)
+mbtn.BackgroundColor3 = Color3.fromRGB(20, 40, 25)
+mbtn.BackgroundTransparency = 0.3
+mbtn.Text = "🟢"
+mbtn.TextSize = 34
+mbtn.TextColor3 = CONFIG.C_MAIN
+mbtn.Font = Enum.Font.GothamBlack
+mbtn.BorderSizePixel = 0
+mbtn.Visible = UserInputService.TouchEnabled
+mbtn.Parent = LocalPlayer:WaitForChild("PlayerGui")
+Instance.new("UICorner", mbtn).CornerRadius = UDim.new(1, 0)
+local ms = Instance.new("UIStroke", mbtn)
+ms.Color = CONFIG.C_MAIN
+ms.Thickness = 2
+mbtn.Activated:Connect(fire)
+
+--───────────── ПАНЕЛЬ (4 вкладки) ─────────────
+do
+    -- ПАРА ПОРТАЛОВ: оба лежат на земле (нормаль строго вверх)
+    local function groundPortalUnder(char, excludeChars)
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return nil end
+
+        local list = table.clone(excludeChars)
+        local o = hrp.Position + Vector3.new(0, 2, 0)
+        local remaining = 60
+
+        for _ = 1, 16 do
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = list
+            params.IgnoreWater = true
+
+            local hit = workspace:Raycast(o, Vector3.new(0, -remaining, 0), params)
+            if not hit then break end
+
+            if isGhost(hit.Instance) then
+                table.insert(list, hit.Instance)
+                local used = (o.Y - hit.Position.Y) + 0.05
+                o = hit.Position + Vector3.new(0, -0.05, 0)
+                remaining = math.max(remaining - used, 1)
+            else
+                return hit.Position, Vector3.yAxis
+            end
+        end
+
+        return hrp.Position - Vector3.new(0, 3, 0), Vector3.yAxis
+    end
+
+    local function openPortalPairTo(target)
+        local myChar = LocalPlayer.Character
+        local tChar = target.Character
+        if not myChar then return false, "Ты без персонажа" end
+        if not (tChar and tChar:FindFirstChild("HumanoidRootPart")) then
+            return false, "Игрок не загружен"
+        end
+
+        local both = { myChar, tChar }
+        clearPortals()
+
+        local myPos, myNorm = groundPortalUnder(myChar, both)
+        if myPos then openPortalAt(myPos, myNorm) end
+
+        local tPos, tNorm = groundPortalUnder(tChar, both)
+        if tPos then openPortalAt(tPos, tNorm) end
+
+        return true
+    end
+
+    local function findPlayer(query)
+        query = string.lower((query or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+        if query == "" then return nil end
+        local best
+        for _, pl in ipairs(Players:GetPlayers()) do
+            if pl ~= LocalPlayer then
+                local n = string.lower(pl.Name)
+                local d = string.lower(pl.DisplayName)
+                if n == query or d == query then return pl end
+                if not best and (string.find(n, query, 1, true)
+                    or string.find(d, query, 1, true)) then
+                    best = pl
+                end
+            end
+        end
+        return best
+    end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "PGPanel"
+    gui.ResetOnSpawn = false
+    gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+    local toggle = Instance.new("TextButton")
+    toggle.AnchorPoint = Vector2.new(0, 1)
+    toggle.Size = UDim2.fromOffset(54, 54)
+    toggle.Position = UDim2.new(0, 14, 1, -14)
+    toggle.BackgroundColor3 = Color3.fromRGB(15, 30, 18)
+    toggle.BackgroundTransparency = 0.15
+    toggle.Text = "🌀"
+    toggle.TextSize = 26
+    toggle.TextColor3 = CONFIG.C_MAIN
+    toggle.Font = Enum.Font.GothamBlack
+    toggle.BorderSizePixel = 0
+    toggle.Parent = gui
+    Instance.new("UICorner", toggle).CornerRadius = UDim.new(1, 0)
+    local tgStroke = Instance.new("UIStroke", toggle)
+    tgStroke.Color = CONFIG.C_MAIN
+    tgStroke.Thickness = 2
+
+    local panel = Instance.new("Frame")
+    panel.AnchorPoint = Vector2.new(0, 1)
+    panel.Size = UDim2.fromOffset(252, 262)
+    panel.Position = UDim2.new(0, 14, 1, -76)
+    panel.BackgroundColor3 = Color3.fromRGB(12, 20, 14)
+    panel.BackgroundTransparency = 0.12
+    panel.BorderSizePixel = 0
+    panel.Visible = false
+    panel.Parent = gui
+    Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 14)
+    local pStroke = Instance.new("UIStroke", panel)
+    pStroke.Color = CONFIG.C_MAIN
+    pStroke.Thickness = 1.5
+    pStroke.Transparency = 0.4
+
+    local TAB_NAMES = { "Игрок", "Плейс", "Очистка", "Инфо" }
+    local tabButtons, contents = {}, {}
+
+    for i, name in ipairs(TAB_NAMES) do
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1/4, -3, 0, 32)
+        b.Position = UDim2.new((i-1)/4, 3, 0, 6)
+        b.BackgroundColor3 = Color3.fromRGB(20, 40, 25)
+        b.BackgroundTransparency = 0.2
+        b.Text = name
+        b.TextSize = 11
+        b.TextColor3 = CONFIG.C_MAIN
+        b.Font = Enum.Font.GothamBold
+        b.BorderSizePixel = 0
+        b.Parent = panel
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 10)
+        tabButtons[i] = b
+
+        local c = Instance.new("Frame")
+        c.Size = UDim2.new(1, -12, 1, -50)
+        c.Position = UDim2.new(0, 6, 0, 44)
+        c.BackgroundTransparency = 1
+        c.Visible = false
+        c.Parent = panel
+        contents[i] = c
+    end
+
+    -- ═══ вкладка 1: игроки ═══
+    local nickBox = Instance.new("TextBox")
+    nickBox.Size = UDim2.new(1, -6, 0, 32)
+    nickBox.BackgroundColor3 = Color3.fromRGB(10, 22, 13)
+    nickBox.Text = ""
+    nickBox.PlaceholderText = "Введи ник игрока..."
+    nickBox.PlaceholderColor3 = Color3.fromRGB(90, 130, 95)
+    nickBox.TextColor3 = CONFIG.C_CORE
+    nickBox.Font = Enum.Font.Gotham
+    nickBox.TextSize = 14
+    nickBox.ClearTextOnFocus = false
+    nickBox.BorderSizePixel = 0
+    nickBox.Parent = contents[1]
+    Instance.new("UICorner", nickBox).CornerRadius = UDim.new(0, 10)
+
+    local searchBtn = Instance.new("TextButton")
+    searchBtn.Size = UDim2.new(1, -6, 0, 30)
+    searchBtn.Position = UDim2.new(0, 0, 0, 36)
+    searchBtn.BackgroundColor3 = Color3.fromRGB(30, 60, 35)
+    searchBtn.Text = "🔎 Телепорт к игроку"
+    searchBtn.TextSize = 14
+    searchBtn.TextColor3 = CONFIG.C_CORE
+    searchBtn.Font = Enum.Font.GothamBold
+    searchBtn.BorderSizePixel = 0
+    searchBtn.Parent = contents[1]
+    Instance.new("UICorner", searchBtn).CornerRadius = UDim.new(0, 10)
+
+    local searchStatus = Instance.new("TextLabel")
+    searchStatus.Size = UDim2.new(1, -6, 0, 16)
+    searchStatus.Position = UDim2.new(0, 0, 0, 68)
+    searchStatus.BackgroundTransparency = 1
+    searchStatus.Text = ""
+    searchStatus.TextColor3 = CONFIG.C_CORE
+    searchStatus.Font = Enum.Font.Gotham
+    searchStatus.TextSize = 12
+    searchStatus.TextXAlignment = Enum.TextXAlignment.Left
+    searchStatus.Parent = contents[1]
+
+    local listFrame = Instance.new("ScrollingFrame")
+    listFrame.Size = UDim2.new(1, 0, 1, -88)
+    listFrame.Position = UDim2.new(0, 0, 0, 88)
+    listFrame.BackgroundTransparency = 1
+    listFrame.BorderSizePixel = 0
+    listFrame.ScrollingDirection = Enum.ScrollingDirection.Y
+    listFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    listFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+    listFrame.Parent = contents[1]
+
+    local listLayout = Instance.new("UIListLayout", listFrame)
+    listLayout.Padding = UDim.new(0, 5)
+    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local function doSearch()
+        local pl = findPlayer(nickBox.Text)
+        if not pl then
+            searchStatus.Text = "❌ Игрок не найден"
+            searchStatus.TextColor3 = Color3.fromRGB(255, 120, 110)
+            return
+        end
+        local ok, err = openPortalPairTo(pl)
+        if ok then
+            searchStatus.Text = "✓ Пара порталов: ты ↔ " .. pl.DisplayName
+            searchStatus.TextColor3 = CONFIG.C_CORE
+        else
+            searchStatus.Text = "❌ " .. (err or "Ошибка")
+            searchStatus.TextColor3 = Color3.fromRGB(255, 120, 110)
+        end
+    end
+    searchBtn.Activated:Connect(doSearch)
+    nickBox.FocusLost:Connect(function(enter)
+        if enter then doSearch() end
+    end)
+
+    local function refreshPlayers()
+        for _, c in ipairs(listFrame:GetChildren()) do
+            if c:IsA("TextButton") or c:IsA("TextLabel") then c:Destroy() end
+        end
+        local any = false
+        for _, pl in ipairs(Players:GetPlayers()) do
+            if pl ~= LocalPlayer then
+                any = true
+                local b = Instance.new("TextButton")
+                b.Size = UDim2.new(1, -6, 0, 36)
+                b.BackgroundColor3 = Color3.fromRGB(20, 40, 25)
+                b.Text = "🌀  " .. pl.DisplayName
+                b.TextSize = 14
+                b.TextColor3 = CONFIG.C_CORE
+                b.Font = Enum.Font.GothamBold
+                b.BorderSizePixel = 0
+                b.Parent = listFrame
+                Instance.new("UICorner", b).CornerRadius = UDim.new(0, 10)
+                b.Activated:Connect(function()
+                    local ok = openPortalPairTo(pl)
+                    b.Text = ok and "✓ Телепорт..." or "❌ Не вышло"
+                    task.delay(0.9, function()
+                        if b.Parent then b.Text = "🌀  " .. pl.DisplayName end
+                    end)
+                end)
+            end
+        end
+        if not any then
+            local lbl = Instance.new("TextLabel")
+            lbl.Size = UDim2.new(1, 0, 0, 36)
+            lbl.BackgroundTransparency = 1
+            lbl.Text = "Других игроков нет"
+            lbl.TextColor3 = CONFIG.C_MAIN
+            lbl.TextTransparency = 0.4
+            lbl.Font = Enum.Font.Gotham
+            lbl.TextSize = 13
+            lbl.Parent = listFrame
+        end
+    end
+
+    -- ═══ вкладка 2: телепорт в другой ПЛЕЙС по ID ═══
+    local placeBox = Instance.new("TextBox")
+    placeBox.Size = UDim2.new(1, -6, 0, 32)
+    placeBox.BackgroundColor3 = Color3.fromRGB(10, 22, 13)
+    placeBox.Text = ""
+    placeBox.PlaceholderText = "ID плейса (число)..."
+    placeBox.PlaceholderColor3 = Color3.fromRGB(90, 130, 95)
+    placeBox.TextColor3 = CONFIG.C_CORE
+    placeBox.Font = Enum.Font.Gotham
+    placeBox.TextSize = 14
+    placeBox.ClearTextOnFocus = false
+    placeBox.BorderSizePixel = 0
+    placeBox.Parent = contents[2]
+    Instance.new("UICorner", placeBox).CornerRadius = UDim.new(0, 10)
+
+    local goBtn = Instance.new("TextButton")
+    goBtn.Size = UDim2.new(1, -6, 0, 34)
+    goBtn.Position = UDim2.new(0, 0, 0, 38)
+    goBtn.BackgroundColor3 = Color3.fromRGB(30, 60, 35)
+    goBtn.Text = "🚀 Телепорт в плейс"
+    goBtn.TextSize = 14
+    goBtn.TextColor3 = CONFIG.C_CORE
+    goBtn.Font = Enum.Font.GothamBold
+    goBtn.BorderSizePixel = 0
+    goBtn.Parent = contents[2]
+    Instance.new("UICorner", goBtn).CornerRadius = UDim.new(0, 10)
+
+    local placeStatus = Instance.new("TextLabel")
+    placeStatus.Size = UDim2.new(1, -6, 0, 16)
+    placeStatus.Position = UDim2.new(0, 0, 0, 76)
+    placeStatus.BackgroundTransparency = 1
+    placeStatus.Text = ""
+    placeStatus.TextColor3 = CONFIG.C_CORE
+    placeStatus.Font = Enum.Font.Gotham
+    placeStatus.TextSize = 12
+    placeStatus.TextXAlignment = Enum.TextXAlignment.Left
+    placeStatus.Parent = contents[2]
+
+    local placeHelp = Instance.new("TextLabel")
+    placeHelp.Size = UDim2.new(1, -6, 0, 80)
+    placeHelp.Position = UDim2.new(0, 0, 0, 96)
+    placeHelp.BackgroundTransparency = 1
+    placeHelp.Text = "ID — число из ссылки на игру (roblox.com/games/ТАМ-АЙДИ/...). Переносит только тебя. Приватные плейсы без доступа не откроются."
+    placeHelp.TextColor3 = CONFIG.C_MAIN
+    placeHelp.TextTransparency = 0.3
+    placeHelp.Font = Enum.Font.Gotham
+    placeHelp.TextSize = 11
+    placeHelp.TextWrapped = true
+    placeHelp.Parent = contents[2]
+
+    local function doPlaceTeleport()
+        local digits = placeBox.Text:gsub("%D", "")
+        if digits == "" then
+            placeStatus.Text = "❌ Введи числовой ID плейса"
+            placeStatus.TextColor3 = Color3.fromRGB(255, 120, 110)
+            return
+        end
+        placeStatus.Text = "🚀 Телепортация в плейс " .. digits .. "..."
+        placeStatus.TextColor3 = CONFIG.C_CORE
+
+        local ok, err = pcall(function()
+            TeleportService:Teleport(tonumber(digits), LocalPlayer)
+        end)
+        if not ok then
+            placeStatus.Text = "❌ Не вышло (подробности в F9)"
+            placeStatus.TextColor3 = Color3.fromRGB(255, 120, 110)
+            warn("[Portal Gun] Телепорт в плейс не сработал: " .. tostring(err))
+        end
+    end
+    goBtn.Activated:Connect(doPlaceTeleport)
+    placeBox.FocusLost:Connect(function(enter)
+        if enter then doPlaceTeleport() end
+    end)
+
+    -- ═══ вкладка 3: очистка ═══
+    local statusLabel = Instance.new("TextLabel")
+    statusLabel.Size = UDim2.new(1, 0, 0, 30)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.Text = "Открыто порталов: 0 / 2"
+    statusLabel.TextColor3 = CONFIG.C_CORE
+    statusLabel.Font = Enum.Font.GothamBold
+    statusLabel.TextSize = 15
+    statusLabel.Parent = contents[3]
+
+    local function updateStatus()
+        local count = (portalA and 1 or 0) + (portalB and 1 or 0)
+        statusLabel.Text = "Открыто порталов: " .. count .. " / 2"
+    end
+
+    portalsChangedCallback = updateStatus
+
+    local wipeBtn = Instance.new("TextButton")
+    wipeBtn.Size = UDim2.new(1, -20, 0, 46)
+    wipeBtn.Position = UDim2.new(0, 10, 0, 50)
+    wipeBtn.BackgroundColor3 = Color3.fromRGB(70, 30, 25)
+    wipeBtn.Text = "🗑  Удалить порталы"
+    wipeBtn.TextSize = 16
+    wipeBtn.TextColor3 = Color3.fromRGB(255, 190, 180)
+    wipeBtn.Font = Enum.Font.GothamBold
+    wipeBtn.BorderSizePixel = 0
+    wipeBtn.Parent = contents[3]
+    Instance.new("UICorner", wipeBtn).CornerRadius = UDim.new(0, 12)
+    wipeBtn.Activated:Connect(function()
+        clearPortals() -- теперь плавно схлопываются
+        updateStatus()
+    end)
+
+    -- ═══ вкладка 4: инфо ═══
+    local picHolder = Instance.new("Frame")
+    picHolder.Size = UDim2.fromOffset(90, 90)
+    picHolder.Position = UDim2.new(0.5, 0, 0, 2)
+    picHolder.AnchorPoint = Vector2.new(0.5, 0)
+    picHolder.BackgroundTransparency = 1
+    picHolder.Parent = contents[4]
+
+    local ringF = Instance.new("Frame")
+    ringF.Size = UDim2.fromOffset(84, 84)
+    ringF.Position = UDim2.new(0.5, 0, 0.5, 0)
+    ringF.AnchorPoint = Vector2.new(0.5, 0.5)
+    ringF.BackgroundTransparency = 1
+    ringF.Parent = picHolder
+    Instance.new("UICorner", ringF).CornerRadius = UDim.new(1, 0)
+    local ringStroke = Instance.new("UIStroke", ringF)
+    ringStroke.Thickness = 7
+    ringStroke.Color = CONFIG.C_MAIN
+    local ringGrad = Instance.new("UIGradient", ringStroke)
+    ringGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, CONFIG.C_CORE),
+        ColorSequenceKeypoint.new(0.5, CONFIG.C_DEEP),
+        ColorSequenceKeypoint.new(1, CONFIG.C_CORE),
+    })
+
+    local inner = Instance.new("Frame")
+    inner.Size = UDim2.fromOffset(64, 64)
+    inner.Position = UDim2.new(0.5, 0, 0.5, 0)
+    inner.AnchorPoint = Vector2.new(0.5, 0.5)
+    inner.BackgroundColor3 = CONFIG.C_DEEP
+    inner.BackgroundTransparency = 0.25
+    inner.BorderSizePixel = 0
+    inner.Parent = picHolder
+    Instance.new("UICorner", inner).CornerRadius = UDim.new(1, 0)
+    local innerGrad = Instance.new("UIGradient", inner)
+    innerGrad.Rotation = 90
+    innerGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, CONFIG.C_MAIN),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(15, 40, 10)),
+    })
+
+    local core = Instance.new("Frame")
+    core.Size = UDim2.fromOffset(18, 18)
+    core.Position = UDim2.new(0.5, 0, 0.5, 0)
+    core.AnchorPoint = Vector2.new(0.5, 0.5)
+    core.BackgroundColor3 = CONFIG.C_CORE
+    core.BorderSizePixel = 0
+    core.Parent = picHolder
+    Instance.new("UICorner", core).CornerRadius = UDim.new(1, 0)
+
+    task.spawn(function()
+        while gui.Parent do
+            ringGrad.Rotation = (ringGrad.Rotation + 3) % 360
+            local pulse = 18 + math.sin(os.clock() * 4) * 3
+            core.Size = UDim2.fromOffset(pulse, pulse)
+            task.wait(0.03)
+        end
+    end)
+
+    local infoText = Instance.new("TextLabel")
+    infoText.Size = UDim2.new(1, -8, 0, 84)
+    infoText.Position = UDim2.new(0, 4, 0, 94)
+    infoText.BackgroundTransparency = 1
+    infoText.Text = "• ЛКМ / 🟢 — портал в прицеле\n• «Игрок» / ник → пара порталов на земле\n• «Плейс» → перенос в другую игру по ID\n• Порталы живут 20 сек, закрываются плавно"
+    infoText.TextColor3 = CONFIG.C_CORE
+    infoText.Font = Enum.Font.Gotham
+    infoText.TextSize = 11
+    infoText.TextWrapped = true
+    infoText.Parent = contents[4]
+
+    local debugBtn = Instance.new("TextButton")
+    debugBtn.Size = UDim2.new(1, -8, 0, 26)
+    debugBtn.Position = UDim2.new(0, 4, 0, 180)
+    debugBtn.BackgroundColor3 = Color3.fromRGB(20, 40, 25)
+    debugBtn.TextSize = 11
+    debugBtn.TextColor3 = CONFIG.C_MAIN
+    debugBtn.Font = Enum.Font.GothamBold
+    debugBtn.BorderSizePixel = 0
+    debugBtn.Parent = contents[4]
+    Instance.new("UICorner", debugBtn).CornerRadius = UDim.new(0, 8)
+
+    local function refreshDebugText()
+        debugBtn.Text = debugAim and "🐞 Метка прицела: ВКЛ" or "🐞 Метка прицела: ВЫКЛ"
+        debugBtn.BackgroundColor3 = debugAim
+            and Color3.fromRGB(70, 30, 25) or Color3.fromRGB(20, 40, 25)
+    end
+    refreshDebugText()
+
+    debugBtn.Activated:Connect(function()
+        debugAim = not debugAim
+        refreshDebugText()
+    end)
+
+    -- ═══ переключение вкладок ═══
+    local function showTab(idx)
+        for i = 1, 4 do
+            contents[i].Visible = (i == idx)
+            tabButtons[i].BackgroundTransparency = (i == idx) and 0 or 0.2
+            tabButtons[i].BackgroundColor3 = (i == idx)
+                and Color3.fromRGB(40, 80, 45) or Color3.fromRGB(20, 40, 25)
+        end
+        if idx == 1 then refreshPlayers() end
+        if idx == 3 then updateStatus() end
+    end
+
+    for i = 1, 4 do
+        tabButtons[i].Activated:Connect(function() showTab(i) end)
+    end
+
+    toggle.Activated:Connect(function()
+        panel.Visible = not panel.Visible
+        if panel.Visible then showTab(1) end
+    end)
+end
+
+--───────────── СТАРТ ─────────────
+buildAndGive()
+
+task.spawn(function()
+    getPortalTemplate()
+end)
+
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    buildAndGive()
+    clearPortals()
+end)
+
+print("[Portal Gun v24] Умный пробой (стекло = цель) + плавное закрытие везде + телепорт в плейс ✅")
