@@ -1,13 +1,11 @@
 --═══════════════════════════════════════════════════════════════════
---  PORTAL GUN v35 — LocalScript
+--  PORTAL GUN v37 — LocalScript
 --  Куда: StarterPlayer → StarterPlayerScripts
 --  TG: RickPrimeScripts
---  v33 (чистая база) + фиксы:
---   • струя: парент → потом WorldPosition (луч не съезжает)
---   • телепорт по ВСЕЙ поверхности портала (TRIGGER_PAD в конфиге)
---   • панель: кнопка ✕ + на телефоне в левом верхнем углу (компакт)
---   • 🌀 справа по центру, 🟢 внизу над прыжком
---   • жизнь порталов 25 сек, уведомление с ретраем
+--  v36 + [v37 FIX]: сплэш снова САМОзакрывается через 2.4 сек
+--  (убрана опечатка Inner.BorderSizePixel, ломавшая функцию сплэша)
+--  • 🌀 и 🟢 перетаскиваются (тап ≠ драг), дефолты от прыжка
+--  • панель сверху-слева, ✕ закрытие, Инфо без наездов
 --═══════════════════════════════════════════════════════════════════
 
 local Players          = game:GetService("Players")
@@ -49,8 +47,6 @@ local CONFIG = {
     PORTAL_SIZE     = 6,
     PORTAL_SPIN     = 60,
 
-    -- зона телепорта: радиус портала + запас.
-    -- края не ловят → подними до 2; засасывает сбоку → опусти до 0.5
     TRIGGER_PAD     = 1.2,
 
     SOUND_FIRE = "",
@@ -73,7 +69,53 @@ local function easeOutBack(t, c)
     return 1 + (c + 1) * u * u * u + c * u * u
 end
 
---───────────── СПЛЭШ ─────────────
+--───────────── ДРАГ КНОПОК ─────────────
+local function makeDraggable(btn)
+    local dragging = false
+    local dragStart = nil
+    local startPos = nil
+    local moved = false
+
+    btn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            moved = false
+            dragStart = input.Position
+            startPos = btn.Position
+        end
+    end)
+
+    btn.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            if delta.Magnitude > 6 then
+                moved = true
+            end
+            btn.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            if dragging then
+                dragging = false
+                dragStart = nil
+                startPos = nil
+            end
+        end
+    end)
+
+    return function()
+        return moved
+    end
+end
+
+--───────────── СПЛЭШ (закрывается сам через 2.4 сек) ─────────────
 local function showSplash()
     local gui = Instance.new("ScreenGui")
     gui.Name = "PGSplash"
@@ -222,7 +264,7 @@ local function showSplash()
     ver.Position = UDim2.new(1, -14, 1, -20)
     ver.AnchorPoint = Vector2.new(1, 1)
     ver.BackgroundTransparency = 1
-    ver.Text = "v35"
+    ver.Text = "v37"
     ver.Font = Enum.Font.Gotham
     ver.TextSize = 11
     ver.TextColor3 = CONFIG.C_MAIN
@@ -249,6 +291,7 @@ local function showSplash()
         end
     end)
 
+    -- автозакрытие: карточка исчезает сама, кнопка не нужна
     task.wait(2.4)
     local fadeInfo = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
     TweenService:Create(dim, fadeInfo, { BackgroundTransparency = 1 }):Play()
@@ -354,7 +397,7 @@ local function getPortalTemplate()
     end
 
     if not asset then
-        portalTemplateTried = false -- ретрай на следующем выстреле
+        portalTemplateTried = false
         warn("[Portal Gun] МОДЕЛЬ ПОРТАЛА не загрузилась → fallback")
         if not isStudio() then
             warn("[Portal Gun] Положи модель портала в ReplicatedStorage с именем '"
@@ -921,8 +964,6 @@ task.spawn(function()
                     local radial = (off - from.normal * alongN).Magnitude
                     local depthWindow = (math.abs(from.normal.Y) > 0.7) and 3.6 or 1.8
 
-                    -- v35: единый триггер = видимый радиус портала + запас.
-                    -- край портала теперь телепортирует, а не только центр
                     local radialLimit = CONFIG.PORTAL_SIZE * 0.5 + CONFIG.TRIGGER_PAD
 
                     if alongN > -0.8 and alongN < depthWindow
@@ -1066,8 +1107,8 @@ local function drawLiquidTracer(origin, aimPoint, fadeTip)
     for i = 0, SEGS do
         local p = origin + dir * (length * i / SEGS)
         local a = Instance.new("Attachment")
-        a.Parent = anchor   -- сначала парент к якорю
-        a.WorldPosition = p -- потом мировая позиция (иначе струя съезжает)
+        a.Parent = anchor
+        a.WorldPosition = p
         atts[i] = a
     end
 
@@ -1255,14 +1296,21 @@ mgui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 mbtn.Parent = mgui
 
 if UserInputService.TouchEnabled then
-    mbtn.Position = UDim2.new(1, -115, 1, -130) -- над прыжком, не в центре экрана
+    mbtn.Position = UDim2.new(1, -115, 1, -165)
 end
 
 Instance.new("UICorner", mbtn).CornerRadius = UDim.new(1, 0)
 local ms = Instance.new("UIStroke", mbtn)
 ms.Color = CONFIG.C_MAIN
 ms.Thickness = 2
-mbtn.Activated:Connect(fire)
+
+local mbtnWasDrag = makeDraggable(mbtn)
+mbtn.Activated:Connect(function()
+    task.defer(function()
+        if mbtnWasDrag() then return end
+        fire()
+    end)
+end)
 
 --───────────── ПАНЕЛЬ (4 вкладки + ✕) ─────────────
 do
@@ -1356,11 +1404,9 @@ do
     tgStroke.Color = CONFIG.C_MAIN
     tgStroke.Thickness = 2
 
-    -- v35: на телефоне 🌀 справа по центру — джойстик и кнопки свободны,
-    -- и панель (она сверху-слева) никогда её не накрывает
     if UserInputService.TouchEnabled then
         toggle.AnchorPoint = Vector2.new(1, 0.5)
-        toggle.Position = UDim2.new(1, -12, 0.5, 0)
+        toggle.Position = UDim2.new(1, -12, 0.5, -70)
     end
 
     local panel = Instance.new("Frame")
@@ -1379,8 +1425,6 @@ do
     pStroke.Thickness = 1.5
     pStroke.Transparency = 0.4
 
-    -- v35: на телефоне панель в левом ВЕРХНЕМ углу — компактная,
-    -- не на весь экран, джойстик снизу свободен
     if UserInputService.TouchEnabled then
         panel.AnchorPoint = Vector2.new(0, 0)
         panel.Position = UDim2.new(0, 12, 0, 10)
@@ -1389,7 +1433,6 @@ do
         end
     end
 
-    -- v35: кнопка закрытия — работает всегда, даже если 🌀 перекрыт
     local closeBtn = Instance.new("TextButton")
     closeBtn.Size = UDim2.fromOffset(30, 30)
     closeBtn.Position = UDim2.new(1, -6, 0, 6)
@@ -1412,7 +1455,7 @@ do
     for i, name in ipairs(TAB_NAMES) do
         local b = Instance.new("TextButton")
         b.Size = UDim2.new(1/4, -3, 0, 30)
-        b.Position = UDim2.new((i-1)/4, 3, 0, 40) -- ниже, чтобы не под ✕
+        b.Position = UDim2.new((i-1)/4, 3, 0, 40)
         b.BackgroundColor3 = Color3.fromRGB(20, 40, 25)
         b.BackgroundTransparency = 0.2
         b.Text = name
@@ -1444,7 +1487,6 @@ do
         cr.Parent = c
     end
 
-    -- вкладка 1: игроки
     local nickBox = Instance.new("TextBox")
     nickBox.Size = UDim2.new(1, -6, 0, 32)
     nickBox.BackgroundColor3 = Color3.fromRGB(10, 22, 13)
@@ -1563,7 +1605,6 @@ do
     Players.PlayerAdded:Connect(refreshIfVisible)
     Players.PlayerRemoving:Connect(refreshIfVisible)
 
-    -- вкладка 2: плейс
     local placeBox = Instance.new("TextBox")
     placeBox.Size = UDim2.new(1, -6, 0, 32)
     placeBox.BackgroundColor3 = Color3.fromRGB(10, 22, 13)
@@ -1637,7 +1678,6 @@ do
         if enter then doPlaceTeleport() end
     end)
 
-    -- вкладка 3: очистка
     local statusLabel = Instance.new("TextLabel")
     statusLabel.Size = UDim2.new(1, 0, 0, 30)
     statusLabel.BackgroundTransparency = 1
@@ -1670,13 +1710,35 @@ do
         updateStatus()
     end)
 
-    -- вкладка 4: инфо
+    local infoScroll = Instance.new("ScrollingFrame")
+    infoScroll.Size = UDim2.new(1, 0, 1, 0)
+    infoScroll.BackgroundTransparency = 1
+    infoScroll.BorderSizePixel = 0
+    infoScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+    infoScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    infoScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    infoScroll.ScrollBarThickness = 3
+    infoScroll.ScrollBarImageColor3 = CONFIG.C_MAIN
+    infoScroll.Parent = contents[4]
+
+    local infoLayout = Instance.new("UIListLayout")
+    infoLayout.Padding = UDim.new(0, 8)
+    infoLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    infoLayout.VerticalAlignment = Enum.VerticalAlignment.Top
+    infoLayout.Parent = infoScroll
+
+    local iconRow = Instance.new("Frame")
+    iconRow.Size = UDim2.new(1, 0, 0, 84)
+    iconRow.BackgroundTransparency = 1
+    iconRow.LayoutOrder = 1
+    iconRow.Parent = infoScroll
+
     local picHolder = Instance.new("Frame")
     picHolder.Size = UDim2.fromOffset(80, 80)
-    picHolder.Position = UDim2.new(0.5, 0, 0, 2)
-    picHolder.AnchorPoint = Vector2.new(0.5, 0)
+    picHolder.AnchorPoint = Vector2.new(0.5, 0.5)
+    picHolder.Position = UDim2.new(0.5, 0, 0.5, 0)
     picHolder.BackgroundTransparency = 1
-    picHolder.Parent = contents[4]
+    picHolder.Parent = iconRow
 
     local ringF = Instance.new("Frame")
     ringF.Size = UDim2.fromOffset(74, 74)
@@ -1730,35 +1792,37 @@ do
     end)
 
     local infoText = Instance.new("TextLabel")
-    infoText.Size = UDim2.new(1, -8, 0, 62)
-    infoText.Position = UDim2.new(0, 4, 0, 86)
+    infoText.Size = UDim2.new(1, -16, 0, 0)
+    infoText.AutomaticSize = Enum.AutomaticSize.Y
     infoText.BackgroundTransparency = 1
     infoText.Text = "• ЛКМ / 🟢 — портал на поверхности (в пустоту — струя тает)\n• «Игрок» / ник → пара порталов на земле\n• Живут 25 сек, закрываются плавно"
     infoText.TextColor3 = CONFIG.C_CORE
     infoText.Font = Enum.Font.Gotham
     infoText.TextSize = 11
     infoText.TextWrapped = true
-    infoText.Parent = contents[4]
+    infoText.TextXAlignment = Enum.TextXAlignment.Left
+    infoText.LayoutOrder = 2
+    infoText.Parent = infoScroll
 
     local creditBig = Instance.new("TextLabel")
-    creditBig.Size = UDim2.new(1, -8, 0, 18)
-    creditBig.Position = UDim2.new(0, 4, 0, 150)
+    creditBig.Size = UDim2.new(1, -16, 0, 18)
     creditBig.BackgroundTransparency = 1
     creditBig.Text = "⚡ TG: RickPrimeScripts"
     creditBig.Font = Enum.Font.GothamBlack
     creditBig.TextSize = 12
     creditBig.TextColor3 = CONFIG.C_MAIN
-    creditBig.Parent = contents[4]
+    creditBig.LayoutOrder = 3
+    creditBig.Parent = infoScroll
 
     local debugBtn = Instance.new("TextButton")
-    debugBtn.Size = UDim2.new(1, -8, 0, 24)
-    debugBtn.Position = UDim2.new(0, 4, 0, 170)
+    debugBtn.Size = UDim2.new(1, -16, 0, 24)
     debugBtn.BackgroundColor3 = Color3.fromRGB(20, 40, 25)
     debugBtn.TextSize = 11
     debugBtn.TextColor3 = CONFIG.C_MAIN
     debugBtn.Font = Enum.Font.GothamBold
     debugBtn.BorderSizePixel = 0
-    debugBtn.Parent = contents[4]
+    debugBtn.LayoutOrder = 4
+    debugBtn.Parent = infoScroll
     Instance.new("UICorner", debugBtn).CornerRadius = UDim.new(0, 8)
 
     local function refreshDebugText()
@@ -1788,21 +1852,24 @@ do
         tabButtons[i].Activated:Connect(function() showTab(i) end)
     end
 
+    local tgWasDrag = makeDraggable(toggle)
     toggle.Activated:Connect(function()
-        panel.Visible = not panel.Visible
-        if panel.Visible then showTab(1) end
+        task.defer(function()
+            if tgWasDrag() then return end
+            panel.Visible = not panel.Visible
+            if panel.Visible then showTab(1) end
+        end)
     end)
 end
 
 --───────────── СТАРТ ─────────────
 
--- системное уведомление (НЕ GUI, рисует сам Roblox, справа сверху)
 task.spawn(function()
     local StarterGui = game:GetService("StarterGui")
     for _ = 1, 5 do
         local ok = pcall(function()
             StarterGui:SetCore("SendNotification", {
-                Title = "PORTAL GUN v35",
+                Title = "PORTAL GUN v37",
                 Text = "Скрипт от RickPrimeScripts | TG: RickPrimeScripts",
                 Duration = 8,
             })
@@ -1828,4 +1895,4 @@ LocalPlayer.CharacterAdded:Connect(function()
     clearPortals()
 end)
 
-print("[Portal Gun v35] TG: RickPrimeScripts ✅")
+print("[Portal Gun v37] TG: RickPrimeScripts — Studio + опубликованная игра ✅")
