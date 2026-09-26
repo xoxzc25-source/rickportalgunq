@@ -1,9 +1,12 @@
 --═══════════════════════════════════════════════════════════════════
---  PORTAL GUN v32 — LocalScript
+--  PORTAL GUN v34 — LocalScript
 --  Куда: StarterPlayer → StarterPlayerScripts
 --  TG: RickPrimeScripts
---  v31 + ФИКС ЛУЧА: аттачменты струи парентятся ДО установки
---  WorldPosition (иначе вся струя съезжала на вектор позиции дла)
+--  v33 + [v34]:
+--   • телепорт по ВСЕМУ видимому порталу: единый триггер
+--     радиус = PORTAL_SIZE*0.5 + TRIGGER_PAD (настройка в CONFIG)
+--   • панель на телефоне: открывается выше джойстика, на низких
+--     экранах (ландшафт) — от верхнего края
 --═══════════════════════════════════════════════════════════════════
 
 local Players          = game:GetService("Players")
@@ -38,12 +41,17 @@ local CONFIG = {
     DEBUG_AIM = false,
 
     PORTALS_ENABLED = true,
-    PORTAL_LIFETIME = 20,
+    PORTAL_LIFETIME = 25,
     TP_COOLDOWN     = 1.2,
 
     PORTAL_MODEL_ID = "rbxassetid://92778664168797",
     PORTAL_SIZE     = 6,
     PORTAL_SPIN     = 60,
+
+    -- [v34] запас зоны телепорта за пределами радиуса портала.
+    -- Край портала не телепортирует → подними до 2.
+    -- Засасывает при проходе рядом → опусти до 0.5.
+    TRIGGER_PAD = 1.2,
 
     SOUND_FIRE = "",
     SOUND_OPEN = "rbxassetid://1013378689",
@@ -214,7 +222,7 @@ local function showSplash()
     ver.Position = UDim2.new(1, -14, 1, -20)
     ver.AnchorPoint = Vector2.new(1, 1)
     ver.BackgroundTransparency = 1
-    ver.Text = "v32"
+    ver.Text = "v34"
     ver.Font = Enum.Font.Gotham
     ver.TextSize = 11
     ver.TextColor3 = CONFIG.C_MAIN
@@ -346,7 +354,7 @@ local function getPortalTemplate()
     end
 
     if not asset then
-        portalTemplateTried = false -- ретрай на следующем выстреле
+        portalTemplateTried = false
         warn("[Portal Gun] МОДЕЛЬ ПОРТАЛА не загрузилась → fallback")
         if not isStudio() then
             warn("[Portal Gun] Положи модель портала в ReplicatedStorage с именем '"
@@ -913,9 +921,9 @@ task.spawn(function()
                     local radial = (off - from.normal * alongN).Magnitude
                     local depthWindow = (math.abs(from.normal.Y) > 0.7) and 3.6 or 1.8
 
-                    local radialLimit = (math.abs(from.normal.Y) > 0.7)
-                        and CONFIG.PORTAL_SIZE * 0.35
-                        or CONFIG.PORTAL_SIZE * 0.5 + 1
+                    -- [v34 FIX] единый триггер: видимый радиус портала + запас.
+                    -- Не делит на пол/стену — поэтому край портала теперь работает.
+                    local radialLimit = CONFIG.PORTAL_SIZE * 0.5 + CONFIG.TRIGGER_PAD
 
                     if alongN > -0.8 and alongN < depthWindow
                         and radial < radialLimit then
@@ -1058,8 +1066,8 @@ local function drawLiquidTracer(origin, aimPoint, fadeTip)
     for i = 0, SEGS do
         local p = origin + dir * (length * i / SEGS)
         local a = Instance.new("Attachment")
-        a.Parent = anchor   -- ФИКС v32: сначала парент к якорю
-        a.WorldPosition = p -- потом мировая позиция — иначе струя съезжает
+        a.Parent = anchor   -- сначала парент к якорю
+        a.WorldPosition = p -- потом мировая позиция
         atts[i] = a
     end
 
@@ -1367,6 +1375,18 @@ do
     pStroke.Color = CONFIG.C_MAIN
     pStroke.Thickness = 1.5
     pStroke.Transparency = 0.4
+
+    -- [v34 FIX] на телефоне панель не накрывает джойстик:
+    -- высокий экран → открывается НАД кнопкой 🌀 и джойстиком,
+    -- низкий экран (ландшафт) → от верхнего края, чтобы влезла
+    if UserInputService.TouchEnabled then
+        if Camera.ViewportSize.Y >= 560 then
+            panel.Position = UDim2.new(0, 14, 1, -262)
+        else
+            panel.AnchorPoint = Vector2.new(0, 0)
+            panel.Position = UDim2.new(0, 14, 0, 8)
+        end
+    end
 
     local TAB_NAMES = { "Игрок", "Плейс", "Очистка", "Инфо" }
     local tabButtons, contents = {}, {}
@@ -1691,7 +1711,7 @@ do
     infoText.Size = UDim2.new(1, -8, 0, 62)
     infoText.Position = UDim2.new(0, 4, 0, 86)
     infoText.BackgroundTransparency = 1
-    infoText.Text = "• ЛКМ / 🟢 — портал на поверхности (в пустоту — струя тает)\n• «Игрок» / ник → пара порталов на земле\n• Живут 20 сек, закрываются плавно"
+    infoText.Text = "• ЛКМ / 🟢 — портал на поверхности (в пустоту — струя тает)\n• «Игрок» / ник → пара порталов на земле\n• Живут 25 сек, закрываются плавно"
     infoText.TextColor3 = CONFIG.C_CORE
     infoText.Font = Enum.Font.Gotham
     infoText.TextSize = 11
@@ -1753,6 +1773,23 @@ do
 end
 
 --───────────── СТАРТ ─────────────
+
+-- системное уведомление (НЕ GUI, рисует сам Roblox, справа сверху)
+task.spawn(function()
+    local StarterGui = game:GetService("StarterGui")
+    for _ = 1, 30 do
+        local ok = pcall(function()
+            StarterGui:SetCore("SendNotification", {
+                Title = "PORTAL GUN v34",
+                Text = "Скрипт от RickPrimeScripts | TG: RickPrimeScripts",
+                Duration = 8,
+            })
+        end)
+        if ok then break end
+        task.wait(1)
+    end
+end)
+
 task.spawn(function()
     showSplash()
 end)
@@ -1769,4 +1806,4 @@ LocalPlayer.CharacterAdded:Connect(function()
     clearPortals()
 end)
 
-print("[Portal Gun v32] TG: RickPrimeScripts — Studio + опубликованная игра ✅")
+print("[Portal Gun v34] TG: RickPrimeScripts ✅")
