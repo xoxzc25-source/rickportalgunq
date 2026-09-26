@@ -1,14 +1,14 @@
 --═══════════════════════════════════════════════════════════════════
---  PORTAL GUN v38 — LocalScript
+--  PORTAL GUN v39 — LocalScript
 --  Куда: StarterPlayer → StarterPlayerScripts
 --  TG: RickPrimeScripts
---  v37 + [v38]: ПАНЕЛЬ ТОЖЕ ПЕРЕТАСКИВАЕТСЯ за фон
---  (кнопки/поля ввода внутри работают, драг только за пустые места)
---  Телефон в приоритете:
---   • 🟢 справа над прыжком, 🌀 справа выше центра — обе драггабельные
---   • панель сверху-слева, компактная на низких экранах, ✕ + тап по 🌀
---   • тап ≠ драг: перетащил кнопку — действие не сработало
---  ПК: всё то же мышью, панель по умолчанию снизу слева.
+--  v38 + [v39]: НА ТЕЛЕФОНЕ ПОРТАЛ СТАВИТСЯ ТАПОМ В ТОЧКУ
+--  Умная система различения жестов:
+--   • тап = палец на экране ≤ 0.22 сек И сдвиг ≤ 14px → портал в точку
+--   • зажатие/верчение камеры (дольше или дальше) → НЕ портал
+--   • тапы по джойстику/UI не считаются (gameProcessed + перехват UI)
+--  • ПК: как было — портал по клику мыши в точку курсора
+--  • 🟢 остаётся запасной кнопкой, 🌀 и панель драггабельные
 --═══════════════════════════════════════════════════════════════════
 
 local Players          = game:GetService("Players")
@@ -51,6 +51,10 @@ local CONFIG = {
     PORTAL_SPIN     = 60,
 
     TRIGGER_PAD     = 1.2,
+
+    -- [v39] настройки тап-жеста на телефоне
+    TAP_MAX_TIME  = 0.22, -- сек: дольше = драг камеры, не тап
+    TAP_MAX_SHIFT = 14,   -- px: сдвиг пальца больше = драг камеры, не тап
 
     SOUND_FIRE = "",
     SOUND_OPEN = "rbxassetid://1013378689",
@@ -267,7 +271,7 @@ local function showSplash()
     ver.Position = UDim2.new(1, -14, 1, -20)
     ver.AnchorPoint = Vector2.new(1, 1)
     ver.BackgroundTransparency = 1
-    ver.Text = "v38"
+    ver.Text = "v39"
     ver.Font = Enum.Font.Gotham
     ver.TextSize = 11
     ver.TextColor3 = CONFIG.C_MAIN
@@ -1016,17 +1020,10 @@ local function isGhost(inst)
     return false
 end
 
---───────────── ПРИЦЕЛИВАНИЕ ─────────────
-local function computeAim(char)
+--───────────── ПРИЦЕЛИВАНИЕ (v39: экранная точка → мир) ─────────────
+local function aimFromScreenPoint(screenPos: Vector2, char: Model)
     local camPos = Camera.CFrame.Position
-
-    local m
-    if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then
-        m = Camera.ViewportSize / 2
-    else
-        m = UserInputService:GetMouseLocation()
-    end
-    local ray = Camera:ViewportPointToRay(m.X, m.Y)
+    local ray = Camera:ViewportPointToRay(screenPos.X, screenPos.Y)
 
     local exclude = { char }
     for _, pl in ipairs(Players:GetPlayers()) do
@@ -1077,6 +1074,17 @@ local function computeAim(char)
 
     local endPoint = camPos + ray.Direction * CONFIG.MAX_RANGE
     return nil, ray, endPoint, true
+end
+
+-- совместимость: старая computeAim (центр/мышь) через новую
+local function computeAim(char)
+    local m
+    if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then
+        m = Camera.ViewportSize / 2
+    else
+        m = UserInputService:GetMouseLocation()
+    end
+    return aimFromScreenPoint(m, char)
 end
 
 --───────────── ЖИДКАЯ СТРУЯ ─────────────
@@ -1236,7 +1244,7 @@ local function drawLiquidTracer(origin, aimPoint, fadeTip)
 end
 
 --───────────── ВЫСТРЕЛ ─────────────
-local function fire()
+local function fireAtScreen(screenPos: Vector2?)
     local char = LocalPlayer.Character
     if not char then return end
     local hum = char:FindFirstChildOfClass("Humanoid")
@@ -1248,7 +1256,17 @@ local function fire()
     fireBusy = true
     task.delay(CONFIG.FIRE_COOLDOWN, function() fireBusy = false end)
 
-    local hit, ray, endPoint, voidShot = computeAim(char)
+    -- [v39] точка прицеливания: переданная точка тапа, иначе мышь/центр
+    local aimPoint = screenPos
+    if not aimPoint then
+        if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then
+            aimPoint = Camera.ViewportSize / 2
+        else
+            aimPoint = UserInputService:GetMouseLocation()
+        end
+    end
+
+    local hit, ray, endPoint, voidShot = aimFromScreenPoint(aimPoint, char)
 
     local muzzleName = currentTool:GetAttribute("MuzzlePart") or ""
     local muzzle = muzzleName ~= ""
@@ -1271,15 +1289,57 @@ local function fire()
     end
 end
 
---───────────── ВВОД (ПК) ─────────────
+--───────────── ВВОД: ПК (мышь как было) ─────────────
 UserInputService.InputBegan:Connect(function(input, gp)
     if gp then return end
     if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        fire()
+        fireAtScreen(nil) -- мышь возьмётся внутри
     end
 end)
 
---───────────── МОБИЛЬНАЯ КНОПКА ВЫСТРЕЛА ─────────────
+--───────────── ВВОД: ТЕЛЕФОН (v39: тап в точку) ─────────────
+do
+    local touchStart = nil    -- { pos = Vector2, t = os.clock() }
+    local touchMoved = false
+
+    UserInputService.InputBegan:Connect(function(input, gp)
+        if input.UserInputType == Enum.UserInputType.Touch then
+            touchStart = { pos = Vector2.new(input.Position.X, input.Position.Y), t = os.clock() }
+            touchMoved = false
+            -- gp НЕ проверяем на старте: тап по UI-элементу перехватит
+            -- сам элемент, а gameProcessed для тача срабатывает и на
+            -- джойстике, и на пустом экране непредсказуемо — фильтруем
+            -- по времени/смещению, это надёжнее
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch and touchStart then
+            local delta = Vector2.new(input.Position.X, input.Position.Y) - touchStart.pos
+            if delta.Magnitude > CONFIG.TAP_MAX_SHIFT then
+                touchMoved = true -- крутит камеру → это не тап
+            end
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input, gp)
+        if input.UserInputType == Enum.UserInputType.Touch and touchStart then
+            local held = os.clock() - touchStart.t
+            local isTap = (held <= CONFIG.TAP_MAX_TIME) and (not touchMoved)
+            local startPos = touchStart.pos
+            touchStart = nil
+
+            if not isTap then return end
+            if gp then return end -- тап пришёлся на UI → не наш
+
+            -- небольшой запас: драг камеры мог закончиться быстро,
+            -- но со сдвигом — уже отфильтрован выше по touchMoved
+            fireAtScreen(startPos)
+        end
+    end)
+end
+
+--───────────── МОБИЛЬНАЯ КНОПКА ВЫСТРЕЛА (запасная) ─────────────
 local mbtn = Instance.new("TextButton")
 mbtn.Size = UDim2.fromOffset(90, 90)
 mbtn.Position = UDim2.new(1, -110, 1, -110)
@@ -1311,7 +1371,7 @@ local mbtnWasDrag = makeDraggable(mbtn)
 mbtn.Activated:Connect(function()
     task.defer(function()
         if mbtnWasDrag() then return end
-        fire()
+        fireAtScreen(nil) -- запасной выстрел в центр экрана
     end)
 end)
 
@@ -1452,7 +1512,7 @@ do
         panel.Visible = false
     end)
 
-    -- [v38] панель перетаскивается за ФОН (кнопки/поля ввода не трогаются)
+    -- панель перетаскивается за ФОН
     do
         local dragging = false
         local dragStart = nil
@@ -1831,7 +1891,7 @@ do
     infoText.Size = UDim2.new(1, -16, 0, 0)
     infoText.AutomaticSize = Enum.AutomaticSize.Y
     infoText.BackgroundTransparency = 1
-    infoText.Text = "• ЛКМ / 🟢 — портал на поверхности (в пустоту — струя тает)\n• «Игрок» / ник → пара порталов на земле\n• Живут 25 сек, закрываются плавно\n• Панель и кнопки можно перетаскивать"
+    infoText.Text = "• Телефон: ТАПНИ по стене/полу — портал там\n  (крутишь камеру — портал НЕ ставится)\n• ПК: ЛКМ по поверхности\n• «Игрок» / ник → пара порталов на земле\n• Живут 25 сек\n• Панель и кнопки можно перетаскивать"
     infoText.TextColor3 = CONFIG.C_CORE
     infoText.Font = Enum.Font.Gotham
     infoText.TextSize = 11
@@ -1905,7 +1965,7 @@ task.spawn(function()
     for _ = 1, 5 do
         local ok = pcall(function()
             StarterGui:SetCore("SendNotification", {
-                Title = "PORTAL GUN v38",
+                Title = "PORTAL GUN v39",
                 Text = "Скрипт от RickPrimeScripts | TG: RickPrimeScripts",
                 Duration = 8,
             })
@@ -1931,4 +1991,4 @@ LocalPlayer.CharacterAdded:Connect(function()
     clearPortals()
 end)
 
-print("[Portal Gun v38] TG: RickPrimeScripts — Studio + опубликованная игра ✅")
+print("[Portal Gun v39] TG: RickPrimeScripts — Studio + опубликованная игра ✅")
