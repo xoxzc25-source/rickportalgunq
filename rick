@@ -1,16 +1,9 @@
 --═══════════════════════════════════════════════════════════════════
---  PORTAL GUN v30 — LocalScript
+--  PORTAL GUN v32 — LocalScript
 --  Куда: StarterPlayer → StarterPlayerScripts
 --  TG: RickPrimeScripts
---  ГЛАВНОЕ против v29:
---   • ДВОЙНАЯ ЗАГРУЗКА АССЕТОВ: сначала ReplicatedStorage
---     ("PortalGun" и "PortalTemplate" — для опубликованной игры),
---     затем GetObjects (работает в Studio)
---   • В Studio: просто вставь скрипт — всё работает по айди
---   • В опубликованной игре: положи модели в ReplicatedStorage
---     с именами PortalGun и PortalTemplate — у игроков всё соберётся
---   • Вся механика v29: сплэш-карточка с TG, кредитка во всех вкладках,
---     струя тает вдали (нет «стены»), портал только на поверхности
+--  v31 + ФИКС ЛУЧА: аттачменты струи парентятся ДО установки
+--  WorldPosition (иначе вся струя съезжала на вектор позиции дла)
 --═══════════════════════════════════════════════════════════════════
 
 local Players          = game:GetService("Players")
@@ -30,7 +23,6 @@ local CONFIG = {
     GUN_ID   = 13392984071,
     GUN_NAME = "Portal Gun",
 
-    -- имена моделей в ReplicatedStorage (для опубликованной игры)
     RS_GUN_NAME     = "PortalGun",
     RS_PORTAL_NAME  = "PortalTemplate",
 
@@ -73,7 +65,7 @@ local function easeOutBack(t, c)
     return 1 + (c + 1) * u * u * u + c * u * u
 end
 
---───────────── СПЛЭШ (TG: RickPrimeScripts) ─────────────
+--───────────── СПЛЭШ ─────────────
 local function showSplash()
     local gui = Instance.new("ScreenGui")
     gui.Name = "PGSplash"
@@ -82,12 +74,12 @@ local function showSplash()
     gui.DisplayOrder = 999
     gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
-    -- лёгкое затемнение фона (не нужно — удали эти 5 строк)
     local dim = Instance.new("Frame")
     dim.Size = UDim2.fromScale(1, 1)
     dim.BackgroundColor3 = Color3.new(0, 0, 0)
     dim.BackgroundTransparency = 0.7
     dim.BorderSizePixel = 0
+    dim.Active = true
     dim.Parent = gui
 
     local card = Instance.new("Frame")
@@ -177,7 +169,6 @@ local function showSplash()
         ColorSequenceKeypoint.new(1, CONFIG.C_MAIN),
     })
 
-    -- бейдж TG + ник
     local tgBadge = Instance.new("TextLabel")
     tgBadge.Size = UDim2.fromOffset(58, 24)
     tgBadge.Position = UDim2.new(0.5, 0, 0, 248)
@@ -223,7 +214,7 @@ local function showSplash()
     ver.Position = UDim2.new(1, -14, 1, -20)
     ver.AnchorPoint = Vector2.new(1, 1)
     ver.BackgroundTransparency = 1
-    ver.Text = "v30"
+    ver.Text = "v32"
     ver.Font = Enum.Font.Gotham
     ver.TextSize = 11
     ver.TextColor3 = CONFIG.C_MAIN
@@ -255,11 +246,13 @@ local function showSplash()
     TweenService:Create(dim, fadeInfo, { BackgroundTransparency = 1 }):Play()
     TweenService:Create(card, fadeInfo, { BackgroundTransparency = 1 }):Play()
     TweenService:Create(cardStroke, fadeInfo, { Transparency = 1 }):Play()
-    for _, o in ipairs(card:GetChildren()) do
+    for _, o in ipairs(card:GetDescendants()) do
         if o:IsA("TextLabel") then
             TweenService:Create(o, fadeInfo, { TextTransparency = 1 }):Play()
         elseif o:IsA("Frame") then
             TweenService:Create(o, fadeInfo, { BackgroundTransparency = 1 }):Play()
+        elseif o:IsA("UIStroke") then
+            TweenService:Create(o, fadeInfo, { Transparency = 1 }):Play()
         end
     end
     TweenService:Create(ringStroke, fadeInfo, { Transparency = 1 }):Play()
@@ -291,9 +284,7 @@ local function playSoundAt(pos, id, pitch)
     Debris:AddItem(holder, 5)
 end
 
---───────────── ДВОЙНАЯ ЗАГРУЗКА АССЕТОВ ─────────────
--- 1) ReplicatedStorage (работает в ОПУБЛИКОВАННОЙ игре)
--- 2) GetObjects (работает только в Studio)
+--───────────── ЗАГРУЗКА АССЕТОВ ─────────────
 local function isStudio()
     local ok = pcall(function() return game:GetService("RunService"):IsStudio() end)
     return ok and game:GetService("RunService"):IsStudio()
@@ -325,11 +316,9 @@ local function loadById(id)
 end
 
 local function loadGunModel()
-    -- сначала ReplicatedStorage
     local stored = loadFromStorage(CONFIG.RS_GUN_NAME)
     if stored then return stored end
 
-    -- затем Studio-загрузка по айди
     local asset = loadById("rbxassetid://" .. CONFIG.GUN_ID)
     if asset then return asset end
 
@@ -351,14 +340,13 @@ local function getPortalTemplate()
     if portalTemplateTried then return portalTemplate end
     portalTemplateTried = true
 
-    -- сначала ReplicatedStorage
     local asset = loadFromStorage(CONFIG.RS_PORTAL_NAME)
     if not asset then
-        -- затем Studio-загрузка по айди
         asset = loadById(CONFIG.PORTAL_MODEL_ID)
     end
 
     if not asset then
+        portalTemplateTried = false -- ретрай на следующем выстреле
         warn("[Portal Gun] МОДЕЛЬ ПОРТАЛА не загрузилась → fallback")
         if not isStudio() then
             warn("[Portal Gun] Положи модель портала в ReplicatedStorage с именем '"
@@ -615,7 +603,7 @@ local function buildFallbackVisual(parentModel, pos, normal, size)
         { Size = Vector3.new(0.12, size * 0.85, size * 0.85) }):Play()
 end
 
---───────────── ОТКРЫТИЕ / ПЛАВНОЕ ЗАКРЫТИЕ ПОРТАЛА ─────────────
+--───────────── ОТКРЫТИЕ / ЗАКРЫТИЕ ПОРТАЛА ─────────────
 local OPEN_DUR  = 0.45
 local CLOSE_DUR = 0.45
 
@@ -798,7 +786,7 @@ local function teleportThrough(from, to)
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not hrp then tpAnimBusy = false return end
+    if not hrp then return end
 
     local entrySpeed = hrp.AssemblyLinearVelocity.Magnitude
     local startCF = hrp.CFrame
@@ -856,7 +844,6 @@ local function teleportThrough(from, to)
         restoreCollisions(saved)
         TweenService:Create(Camera, TweenInfo.new(0.3), { FieldOfView = baseFOV }):Play()
         blur:Destroy()
-        tpAnimBusy = false
         return
     end
 
@@ -905,7 +892,6 @@ local function teleportThrough(from, to)
     end
 
     restoreCollisions(saved)
-    tpAnimBusy = false
 end
 
 task.spawn(function()
@@ -927,10 +913,18 @@ task.spawn(function()
                     local radial = (off - from.normal * alongN).Magnitude
                     local depthWindow = (math.abs(from.normal.Y) > 0.7) and 3.6 or 1.8
 
+                    local radialLimit = (math.abs(from.normal.Y) > 0.7)
+                        and CONFIG.PORTAL_SIZE * 0.35
+                        or CONFIG.PORTAL_SIZE * 0.5 + 1
+
                     if alongN > -0.8 and alongN < depthWindow
-                        and radial < CONFIG.PORTAL_SIZE * 0.5 + 1 then
+                        and radial < radialLimit then
                         tpAnimBusy = true
-                        task.spawn(teleportThrough, from, to)
+                        task.spawn(function()
+                            local ok, err = pcall(teleportThrough, from, to)
+                            if not ok then warn("[Portal Gun] tp error:", err) end
+                            tpAnimBusy = false
+                        end)
                         break
                     end
                 end
@@ -1049,13 +1043,23 @@ local function drawLiquidTracer(origin, aimPoint, fadeTip)
     holder.Name = "PG_Tracer"
     holder.Parent = workspace
 
+    local anchor = Instance.new("Part")
+    anchor.Size = Vector3.new(0.05, 0.05, 0.05)
+    anchor.Transparency = 1
+    anchor.Anchored = true
+    anchor.CanCollide = false
+    anchor.CanQuery = false
+    anchor.CanTouch = false
+    anchor.CFrame = CFrame.new(origin)
+    anchor.Parent = holder
+
     local SEGS = 10
     local atts = {}
     for i = 0, SEGS do
         local p = origin + dir * (length * i / SEGS)
         local a = Instance.new("Attachment")
-        a.WorldPosition = p
-        a.Parent = workspace.Terrain
+        a.Parent = anchor   -- ФИКС v32: сначала парент к якорю
+        a.WorldPosition = p -- потом мировая позиция — иначе струя съезжает
         atts[i] = a
     end
 
@@ -1196,7 +1200,8 @@ local function fire()
     local hit, ray, endPoint, voidShot = computeAim(char)
 
     local muzzleName = currentTool:GetAttribute("MuzzlePart") or ""
-    local muzzle = muzzleName ~= "" and char:FindFirstChild(muzzleName, true) or nil
+    local muzzle = muzzleName ~= ""
+        and currentTool:FindFirstChild(muzzleName, true) or nil
     local origin
     if muzzle then
         origin = muzzle.Position
@@ -1234,7 +1239,17 @@ mbtn.TextColor3 = CONFIG.C_MAIN
 mbtn.Font = Enum.Font.GothamBlack
 mbtn.BorderSizePixel = 0
 mbtn.Visible = UserInputService.TouchEnabled
-mbtn.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local mgui = Instance.new("ScreenGui")
+mgui.Name = "PGMobile"
+mgui.ResetOnSpawn = false
+mgui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+mbtn.Parent = mgui
+
+if UserInputService.TouchEnabled then
+    mbtn.Position = UDim2.new(1, -120, 1, -210)
+end
+
 Instance.new("UICorner", mbtn).CornerRadius = UDim.new(1, 0)
 local ms = Instance.new("UIStroke", mbtn)
 ms.Color = CONFIG.C_MAIN
@@ -1333,6 +1348,10 @@ do
     tgStroke.Color = CONFIG.C_MAIN
     tgStroke.Thickness = 2
 
+    if UserInputService.TouchEnabled then
+        toggle.Position = UDim2.new(0, 14, 1, -200)
+    end
+
     local panel = Instance.new("Frame")
     panel.AnchorPoint = Vector2.new(0, 1)
     panel.Size = UDim2.fromOffset(252, 262)
@@ -1341,6 +1360,7 @@ do
     panel.BackgroundTransparency = 0.12
     panel.BorderSizePixel = 0
     panel.Visible = false
+    panel.Active = true
     panel.Parent = gui
     Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 14)
     local pStroke = Instance.new("UIStroke", panel)
@@ -1386,7 +1406,6 @@ do
         cr.Parent = c
     end
 
-    -- вкладка 1: игроки
     local nickBox = Instance.new("TextBox")
     nickBox.Size = UDim2.new(1, -6, 0, 32)
     nickBox.BackgroundColor3 = Color3.fromRGB(10, 22, 13)
@@ -1499,7 +1518,12 @@ do
         end
     end
 
-    -- вкладка 2: плейс
+    local function refreshIfVisible()
+        if panel.Visible and contents[1].Visible then refreshPlayers() end
+    end
+    Players.PlayerAdded:Connect(refreshIfVisible)
+    Players.PlayerRemoving:Connect(refreshIfVisible)
+
     local placeBox = Instance.new("TextBox")
     placeBox.Size = UDim2.new(1, -6, 0, 32)
     placeBox.BackgroundColor3 = Color3.fromRGB(10, 22, 13)
@@ -1541,7 +1565,7 @@ do
     placeHelp.Size = UDim2.new(1, -6, 0, 70)
     placeHelp.Position = UDim2.new(0, 0, 0, 96)
     placeHelp.BackgroundTransparency = 1
-    placeHelp.Text = "ID — число из ссылки на игру (roblox.com/games/ТАМ-АЙДИ/...). Переносит только тебя."
+    placeHelp.Text = "ID — число из ссылки на игру (roblox.com/games/ТАМ-АЙДИ/...). Переносит только тебя. Работает только в ОПУБЛИКОВАННОЙ игре."
     placeHelp.TextColor3 = CONFIG.C_MAIN
     placeHelp.TextTransparency = 0.3
     placeHelp.Font = Enum.Font.Gotham
@@ -1573,7 +1597,6 @@ do
         if enter then doPlaceTeleport() end
     end)
 
-    -- вкладка 3: очистка
     local statusLabel = Instance.new("TextLabel")
     statusLabel.Size = UDim2.new(1, 0, 0, 30)
     statusLabel.BackgroundTransparency = 1
@@ -1606,7 +1629,6 @@ do
         updateStatus()
     end)
 
-    -- вкладка 4: инфо
     local picHolder = Instance.new("Frame")
     picHolder.Size = UDim2.fromOffset(80, 80)
     picHolder.Position = UDim2.new(0.5, 0, 0, 2)
@@ -1747,4 +1769,4 @@ LocalPlayer.CharacterAdded:Connect(function()
     clearPortals()
 end)
 
-print("[Portal Gun v30] TG: RickPrimeScripts — Studio + опубликованная игра ✅")
+print("[Portal Gun v32] TG: RickPrimeScripts — Studio + опубликованная игра ✅")
